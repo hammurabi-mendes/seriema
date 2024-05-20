@@ -40,7 +40,7 @@ using std::defer_lock;
 
 using std::atomic;
 
-namespace dsys {
+namespace seriema {
     extern void flush_send_completion_queues();
 };
 
@@ -116,7 +116,7 @@ public:
 
     inline void spin_nonzero_operations_left() const noexcept {
         while(get_number_operations_left() > 0) {
-            dsys::flush_send_completion_queues();
+            seriema::flush_send_completion_queues();
         }
     }
 

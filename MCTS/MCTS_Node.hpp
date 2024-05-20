@@ -36,8 +36,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "utils/Random.hpp"
 
-using dsys::RDMAMessengerGlobal;
-using dsys::RDMAAggregatorGlobal;
+using seriema::RDMAMessengerGlobal;
+using seriema::RDMAAggregatorGlobal;
 
 #ifdef STATS
 extern thread_local uint64_t thread_total_visits;
@@ -196,7 +196,7 @@ public:
                 continue;
             }
 
-            if(dsys::get_process_rank(get_thread(move)) == process_rank) {
+            if(seriema::get_process_rank(get_thread(move)) == process_rank) {
                 get_child(move)->set_levels_remaining_descendants(new_levels_remaining);
             }
         }
@@ -285,7 +285,7 @@ public:
             return observed;
         }
 
-        int proposed = state->get_thread(move) % dsys::number_threads;
+        int proposed = state->get_thread(move) % seriema::number_threads;
 
         if(children_information[move].owning_thread.compare_exchange_strong(observed, proposed, std::memory_order_relaxed, std::memory_order_relaxed)) {
             return proposed;
@@ -297,7 +297,7 @@ public:
     }
 
     uint64_t get_process(uint64_t move) {
-        return dsys::get_process_rank(get_thread(move));
+        return seriema::get_process_rank(get_thread(move));
     }
 
     uint64_t attempt_expansion(uint64_t number_visits) {
@@ -436,7 +436,7 @@ public:
             return;
         }
 
-        if(dsys::get_process_rank(get_parent().get_thread_id()) == process_rank) {
+        if(seriema::get_process_rank(get_parent().get_thread_id()) == process_rank) {
         // NOTE: Alternative
         // if(get_parent().get_thread_id() == thread_id) {
             get_parent()->update_child(parent_move, simulation_report);
@@ -676,7 +676,7 @@ public:
 
         // Visit child
 
-        if(dsys::get_process_rank(get_thread(move)) == process_rank) {
+        if(seriema::get_process_rank(get_thread(move)) == process_rank) {
         // NOTE: Alternative
         // if(get_thread(move) == thread_id) {
             child->perform_selection(total_number_selections);

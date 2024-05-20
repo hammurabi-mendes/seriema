@@ -21,13 +21,13 @@
 using std::accumulate;
 using std::thread;
 
-using dsys::Barrier;
-using dsys::Synchronizer;
+using seriema::Barrier;
+using seriema::Synchronizer;
 
-using dsys::number_threads;
-using dsys::number_threads_process;
-using dsys::number_processes;
-using dsys::process_rank;
+using seriema::number_threads;
+using seriema::number_threads_process;
+using seriema::number_processes;
+using seriema::process_rank;
 
 #define MAX_THREADS_SUPPORTED 128
 /**
@@ -149,14 +149,14 @@ struct MPIThreadHelper {
         if(nonblock) {
             routineReturned = &bufferIsReady;
         }
-        accumulatedRecvBuffers[dsys::thread_rank] = threadLocalRecvBuffer;
-        if(dsys::thread_rank == rootThread && process_rank == rootProcess) {
+        accumulatedRecvBuffers[seriema::thread_rank] = threadLocalRecvBuffer;
+        if(seriema::thread_rank == rootThread && process_rank == rootProcess) {
             processSendBuffer = threadLocalSendBuffer;
         }
 
         threadCheckIn.wait();
 
-        if(dsys::thread_rank == rootThread) {
+        if(seriema::thread_rank == rootThread) {
             if(!nonblock) {
                 processRecvBuffer = new T[numberRecords / number_processes];
                 MPIHelper::scatter(processSendBuffer, processRecvBuffer, rootProcess, datatype, numberRecords / number_processes);
@@ -187,11 +187,11 @@ struct MPIThreadHelper {
             if(copy) {
                 int numRecordsPerThread = numberRecords / number_threads;
                 for(auto i = 0; i < numRecordsPerThread; i++) {
-                    threadLocalRecvBuffer[i] = processRecvBuffer[dsys::thread_rank * numRecordsPerThread + i];
+                    threadLocalRecvBuffer[i] = processRecvBuffer[seriema::thread_rank * numRecordsPerThread + i];
                 }
             }
             else {
-                threadLocalRecvBuffer = &processRecvBuffer[dsys::thread_rank * numberRecords / number_threads];
+                threadLocalRecvBuffer = &processRecvBuffer[seriema::thread_rank * numberRecords / number_threads];
             }
         }
     }
@@ -239,7 +239,7 @@ struct MPIThreadHelper {
         static Barrier threadCheckIn(number_threads_process);
         static Synchronizer bufferIsReady(1);
 
-        processLocalBuffer[dsys::thread_rank] = threadLocalBuffer;
+        processLocalBuffer[seriema::thread_rank] = threadLocalBuffer;
         if(nonblock) {
             routineReturned = &bufferIsReady;
         }
@@ -249,7 +249,7 @@ struct MPIThreadHelper {
         int rootThread = rootThreadID % number_threads_process;
         int rootProcess = rootThreadID / number_threads_process;
 
-        if(dsys::thread_rank == rootThread) {
+        if(seriema::thread_rank == rootThread) {
             if(!nonblock) {
                 int numberRecordsInProcess = numberRecords * number_threads_process;
                 T *sendBuffer = new T[numberRecordsInProcess];
@@ -327,12 +327,12 @@ struct MPIThreadHelper {
             routineReturned = &bufferIsReady;
         }
 
-        processSendBuffer[dsys::thread_rank] = threadLocalSendBuffer;
-        processRecvBuffers[dsys::thread_rank] = threadLocalRecvBuffer;
+        processSendBuffer[seriema::thread_rank] = threadLocalSendBuffer;
+        processRecvBuffers[seriema::thread_rank] = threadLocalRecvBuffer;
 
         threadCheckIn.wait();
 
-        if(dsys::thread_rank == 0) {
+        if(seriema::thread_rank == 0) {
             if(!nonblock) {
                 T *accumulatedData = new T[numberRecords * number_threads_process];
                 processRecvBuffer = new T[numberRecords * number_threads];
@@ -355,7 +355,7 @@ struct MPIThreadHelper {
 
                     MPIHelper::allGather(accumulatedData, processRecvBuffer, datatype, numberRecords * number_threads_process);
 
-                    for(auto t = 0; t < dsys::number_threads_process; ++t) {
+                    for(auto t = 0; t < seriema::number_threads_process; ++t) {
                         T *curr = processRecvBuffers[t];
 
                         if(true) { //TODO: Fix when we do black box reference counting
@@ -429,8 +429,8 @@ struct MPIThreadHelper {
         static Barrier threadCheckIn(number_threads_process);
         static Synchronizer threadsWereParsed(1);
 
-        processLocalSendBuffers[dsys::thread_rank] = threadLocalSendBuffer;
-        accumulatedRecvBuffers[dsys::thread_rank] = threadLocalRecvBuffer;
+        processLocalSendBuffers[seriema::thread_rank] = threadLocalSendBuffer;
+        accumulatedRecvBuffers[seriema::thread_rank] = threadLocalRecvBuffer;
 
         if(nonblock) {
             bufferIsReady = &threadsWereParsed;
@@ -438,7 +438,7 @@ struct MPIThreadHelper {
 
         threadCheckIn.wait();
 
-        if(dsys::thread_rank == 0) {
+        if(seriema::thread_rank == 0) {
             processLocalRecvBuffer = new T[numberRecords * number_threads_process];
             if(!nonblock) {
                 T *accumulatedData = new T[numberRecords * number_threads_process];
@@ -461,7 +461,7 @@ struct MPIThreadHelper {
 
                     MPIHelper::doAllToAll(accumulatedData, processLocalRecvBuffer, datatype, numberRecords * number_threads_process / number_processes);
 
-                    for(auto t = 0; t < dsys::number_threads_process; ++t) {
+                    for(auto t = 0; t < seriema::number_threads_process; ++t) {
                         T *curr = accumulatedRecvBuffers[t];
                         if(true) { //TODO: Fix when we do black box reference counting
                             for(auto i = 0; i < numberRecords; ++i) {
@@ -481,11 +481,11 @@ struct MPIThreadHelper {
             threadCheckIn.wait();
             if(copy) {
                 for(auto i = 0; i < numberRecords; i++) {
-                    threadLocalRecvBuffer[i] = processLocalRecvBuffer[dsys::thread_rank * numberRecords + i];
+                    threadLocalRecvBuffer[i] = processLocalRecvBuffer[seriema::thread_rank * numberRecords + i];
                 }
             }
             else {
-                threadLocalRecvBuffer = &processLocalRecvBuffer[dsys::thread_rank * numberRecords];
+                threadLocalRecvBuffer = &processLocalRecvBuffer[seriema::thread_rank * numberRecords];
             }
         }
     }
@@ -545,16 +545,16 @@ struct MPIThreadHelper {
             routineReturned = &bufferIsReady;
         }
 
-        processSendBuffer[dsys::thread_rank] = threadLocalSendBuffer;
-        processSendSizes[dsys::thread_rank] = threadLocalSendSizes;
-        processRecvSizes[dsys::thread_rank] = threadLocalRecvSizes;
-        processRecvBuffer[dsys::thread_rank] = threadLocalRecvBuffer;
-        processRecvOffsets[dsys::thread_rank] = threadLocalRecvOffsets;
-        processSendOffsets[dsys::thread_rank] = threadLocalSendOffsets;
+        processSendBuffer[seriema::thread_rank] = threadLocalSendBuffer;
+        processSendSizes[seriema::thread_rank] = threadLocalSendSizes;
+        processRecvSizes[seriema::thread_rank] = threadLocalRecvSizes;
+        processRecvBuffer[seriema::thread_rank] = threadLocalRecvBuffer;
+        processRecvOffsets[seriema::thread_rank] = threadLocalRecvOffsets;
+        processSendOffsets[seriema::thread_rank] = threadLocalSendOffsets;
 
         threadCheckIn.wait();
 
-        if(dsys::thread_rank == 0) {
+        if(seriema::thread_rank == 0) {
             if(!nonblock) {
                 int *threadSpecificSendSizes = new int[number_threads_process * number_threads];
                 int processSpecificSendSizes[MAX_PROCESSES_SUPPORTED] = {0};
@@ -565,7 +565,7 @@ struct MPIThreadHelper {
                     for(auto j = 0; j < number_threads_process; j++) {
                         threadSpecificSendSizes[i * number_threads_process + j] = processSendSizes[j][i];
                         totalSend += processSendSizes[j][i];
-                        processSpecificSendSizes[dsys::get_process_rank(i)] += processSendSizes[j][i];
+                        processSpecificSendSizes[seriema::get_process_rank(i)] += processSendSizes[j][i];
                     }
                 }
 
@@ -626,7 +626,7 @@ struct MPIThreadHelper {
                         for(auto j = 0; j < number_threads_process; j++) {
                             threadSpecificSendSizes[i * number_threads_process + j] = processSendSizes[j][i];
                             totalSend += processSendSizes[j][i];
-                            processSpecificSendSizes[dsys::get_process_rank(i)] += processSendSizes[j][i];
+                            processSpecificSendSizes[seriema::get_process_rank(i)] += processSendSizes[j][i];
                         }
                     }
 
@@ -720,7 +720,7 @@ struct MPIThreadHelper {
                     for(auto j = 0; j < number_threads_process; ++j) {
                         for(auto k = 0; k < number_threads_process; ++k) {
                             int recvSizeOffset = i * number_threads_process * number_threads_process + j * number_threads_process + k;
-                            if(j == dsys::thread_rank) {
+                            if(j == seriema::thread_rank) {
                                 int senderThreadID = i * number_threads_process + k;
 
                                 int myStart = threadLocalRecvOffsets[senderThreadID];
@@ -809,7 +809,7 @@ struct MPIThreadHelper {
      * @param request MPI request that defaults to the thread_local global_request from dsys.
 	 */
     template<typename T>
-    static void largeAllToAllV(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype datatype, MPI_Request &request = dsys::global_request) {
+    static void largeAllToAllV(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype datatype, MPI_Request &request = seriema::global_request) {
         vector<int> newSendSizes(number_threads);
         vector<MPI_Datatype> newSendTypes(number_threads);
         vector<MPI_Aint> newSendOffsets(number_threads);
@@ -859,7 +859,7 @@ struct MPIThreadHelper {
      * @param request MPI request that defaults to the thread_local global_request from dsys
 	 */
     // template<typename T>
-    // static inline void doAllToAllW(T *sendBuffer, int *sendSizes, int *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, int *recvSizes, int *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = dsys::global_request) {
+    // static inline void doAllToAllW(T *sendBuffer, int *sendSizes, int *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, int *recvSizes, int *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = seriema::global_request) {
     //     //HM: TODO
     // }
 
@@ -927,7 +927,7 @@ struct MPIThreadHelper {
      * @param request MPI request that defaults to the thread_local global_request from dsys
 	 */
     // template<typename T>
-    // static inline void largeAllToAllW(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = dsys::global_request) {
+    // static inline void largeAllToAllW(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = seriema::global_request) {
     //     vector<int> newSendSizes(number_threads);
     //     vector<MPI_Datatype> newSendTypes(number_threads);
     //     vector<MPI_Aint> newSendOffsets(number_threads);
@@ -967,7 +967,7 @@ struct MPIThreadHelper {
     static inline void barrier() {
         static Barrier threadCheckIn(number_threads_process);
         threadCheckIn.wait();
-        if(dsys::thread_rank == 0) {
+        if(seriema::thread_rank == 0) {
             MPI_Barrier(MPI_COMM_WORLD);
         }
         threadCheckIn.wait();
@@ -982,7 +982,7 @@ struct MPIThreadHelper {
         }
 
         static T *allThreadsBuffer[MAX_THREADS_SUPPORTED];
-        allThreadsBuffer[dsys::thread_rank] = threadBuffer;
+        allThreadsBuffer[seriema::thread_rank] = threadBuffer;
 
         static T *processBuffer;
 
@@ -991,7 +991,7 @@ struct MPIThreadHelper {
         int rootThread = rootThreadID % number_threads_process;
         int rootProcess = rootThreadID / number_threads_process;
 
-        if(dsys::thread_rank == rootThread % number_threads_process) {
+        if(seriema::thread_rank == rootThread % number_threads_process) {
             processBuffer = threadBuffer;
             if(!nonblock) {
                 MPIHelper::broadcast(processBuffer, datatype, rootProcess, numRecords);
@@ -1000,7 +1000,7 @@ struct MPIThreadHelper {
                 Synchronizer *pointerRoutineReturned = &routineReturned;
                 thread waiter([&, numRecords, rootProcess, datatype, pointerRoutineReturned, copy]() {
                     MPIHelper::broadcast(processBuffer, datatype, rootProcess, numRecords);
-                    for(auto t = 0; t < dsys::number_threads_process; ++t) {
+                    for(auto t = 0; t < seriema::number_threads_process; ++t) {
                         T *curr = allThreadsBuffer[t];
                         if(copy) {
                             for(auto i = 0; i < numRecords; ++i) {
@@ -1016,7 +1016,7 @@ struct MPIThreadHelper {
                 waiter.detach();
             }
         }
-        if(dsys::thread_rank != rootThread % dsys::number_threads_process && !nonblock) {
+        if(seriema::thread_rank != rootThread % seriema::number_threads_process && !nonblock) {
             threadCheckIn.wait();
             if(copy) {
                 for(int i = 0; i < numRecords; i++) {

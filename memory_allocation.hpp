@@ -37,7 +37,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <mutex>
 
 #ifdef THREAD_HANDLER_H
-using dsys::get_transmitter;
+using seriema::get_transmitter;
 #else
 extern IBTransmitter<QP_GLOBAL_FLUSH_INTERVAL, QP_THREAD_FLUSH_INTERVAL> *get_transmitter(int destination_thread_id) noexcept;
 #endif /* THREAD_HANDLER_H */
@@ -413,9 +413,9 @@ struct MemoryAllocator: public BasicMemoryAllocator {
         }
 
 #ifdef DEBUG
-        dsys::print_mutex.lock();
+        seriema::print_mutex.lock();
         cout << "MemoryAllocator is allocating " << (current_multiplier * initial_number_buffers) << " new buffers (rounded up)" << endl;
-        dsys::print_mutex.unlock();
+        seriema::print_mutex.unlock();
 #endif /* DEBUG */
 
 #ifdef STATS
@@ -432,9 +432,9 @@ struct MemoryAllocator: public BasicMemoryAllocator {
             }
         }
 #ifdef STATS
-        dsys::print_mutex.lock();
+        seriema::print_mutex.lock();
         cout << "Allocated " << number_allocations << " times" << endl;
-        dsys::print_mutex.unlock();
+        seriema::print_mutex.unlock();
 #endif /* STATS */
     }
 

@@ -45,7 +45,7 @@ using std::max;
 
 using std::accumulate;
 
-using dsys::GlobalAddress;
+using seriema::GlobalAddress;
 
 /**
  * Class that manages a dynamically allocated buffer (in manager mode),

@@ -57,7 +57,7 @@ using std::cout;
 using std::endl;
 using std::cerr;
 
-namespace dsys {
+namespace seriema {
 
 constexpr int COMPLETION_QUERY_BUFFER_SIZE = 65536;
 
@@ -124,7 +124,7 @@ inline void flush_queue_pairs() {
     }
 
     while(flush_synchronizer.get_number_operations_left() > 0) {
-        dsys::flush_send_completion_queues();
+        seriema::flush_send_completion_queues();
     }
 }
 
@@ -535,4 +535,4 @@ int finalize_thread_handler() {
     return 0;
 }
 
-}; // namespace dsys
+}; // namespace seriema

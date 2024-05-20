@@ -47,15 +47,15 @@ using std::cout;
 /// Useful print functions
 #define PRINT_INFO(str)                                                        \
   {                                                                            \
-    dsys::print_mutex.lock();                                                  \
+    seriema::print_mutex.lock();                                                  \
     cout << str << std::endl;                                                  \
-    dsys::print_mutex.unlock();                                                \
+    seriema::print_mutex.unlock();                                                \
   }
 #define PRINT_ERROR(str)                                                       \
   {                                                                            \
-    dsys::print_mutex.lock();                                                  \
+    seriema::print_mutex.lock();                                                  \
     cerr << str << std::endl;                                                  \
-    dsys::print_mutex.unlock();                                                \
+    seriema::print_mutex.unlock();                                                \
   }
 
 #define PRINTVAR_INFO(x) PRINT_INFO(#x ": " << x)

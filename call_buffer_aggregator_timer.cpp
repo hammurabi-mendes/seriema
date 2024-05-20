@@ -34,7 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <thread>
 #include <mutex>
 
-#include "dsys.h"
+#include "seriema.h"
 
 using std::vector;
 using std::array;
@@ -46,33 +46,33 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
-using dsys::GlobalAddress;
+using seriema::GlobalAddress;
 
-using dsys::number_processes;
-using dsys::process_rank;
-using dsys::number_threads;
-using dsys::thread_rank;
-using dsys::number_threads_process;
-using dsys::thread_id;
+using seriema::number_processes;
+using seriema::process_rank;
+using seriema::number_threads;
+using seriema::thread_rank;
+using seriema::number_threads_process;
+using seriema::thread_id;
 
-using dsys::thread_context;
+using seriema::thread_context;
 
-using dsys::context;
-using dsys::queue_pairs;
+using seriema::context;
+using seriema::queue_pairs;
 
-using dsys::incoming_message_queues;
+using seriema::incoming_message_queues;
 
-using dsys::RDMAMessengerGlobal;
-using dsys::RDMAAggregatorGlobal;
+using seriema::RDMAMessengerGlobal;
+using seriema::RDMAAggregatorGlobal;
 
-using dsys::Configuration;
+using seriema::Configuration;
 
 constexpr uint64_t number_operations = 6553600;
 
 atomic<uint64_t> aggregate_nanosecond_difference[128];
 
 void tester_thread(int offset) {
-    dsys::init_thread(offset);
+    seriema::init_thread(offset);
 
     RDMAMemory *source = new RDMAMemory(context, 4096);
 
@@ -88,18 +88,18 @@ void tester_thread(int offset) {
 
     for(uint64_t iteration = 0; iteration < number_operations / number_threads; iteration++) {
         // if(iteration % 1000 == 0) {
-        //     dsys::print_mutex.lock();
+        //     seriema::print_mutex.lock();
         //     cout << "ID = " << thread_id << " iteration = " << iteration << " received = " << received << endl;
-        //     dsys::print_mutex.unlock();
+        //     seriema::print_mutex.unlock();
         // }
 
         int destination_thread_id = iteration % number_threads;
         
         bool result = aggregator.call_buffer(destination_thread_id, [iteration](void *buffer, uint64_t size) {
                 if(iteration % 10000 == 0) {
-                    dsys::print_mutex.lock();
+                    seriema::print_mutex.lock();
                     cout << "receiver working on iteration " << iteration << "(buffer = " << buffer << ", size = " << size << ")" << endl;
-                    dsys::print_mutex.unlock();
+                    seriema::print_mutex.unlock();
                 }
             }, source, 0, 4096);
         
@@ -132,17 +132,17 @@ void tester_thread(int offset) {
     double message_rate = ((double) (number_operations * 1000000000ULL)) / nanosecond_difference;
     double bandwidth = ((double) (number_operations * 4096)) / (1024 * 1024) / (((double) nanosecond_difference) / 1000000000ULL);
 
-    dsys::print_mutex.lock();
+    seriema::print_mutex.lock();
     printf("Rate: %.2f messages/s\nBandwidth: %.2f MB/s\n", message_rate, bandwidth);
-    dsys::print_mutex.unlock();
+    seriema::print_mutex.unlock();
 
     aggregate_nanosecond_difference[thread_rank] = nanosecond_difference;
 
-    dsys::print_mutex.lock();
+    seriema::print_mutex.lock();
     cout << "done" << endl;
-    dsys::print_mutex.unlock();
+    seriema::print_mutex.unlock();
 
-    dsys::finalize_thread();
+    seriema::finalize_thread();
 }
 
 int main(int argc, char **argv) {
@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
 
     Configuration configuration{number_threads_process};
 
-    dsys::init_thread_handler(argc, argv, configuration);
+    seriema::init_thread_handler(argc, argv, configuration);
 
     for(int i = 0; i < number_threads_process; i++) {
         thread_list.push_back(thread(tester_thread, i));
@@ -180,7 +180,7 @@ int main(int argc, char **argv) {
 
     printf("AVG Rate: %.2f messages/s\nAVG Bandwidth: %.2f MB/s\n", message_rate, bandwidth);
 
-    dsys::finalize_thread_handler();
+    seriema::finalize_thread_handler();
 
     return 0;
 }

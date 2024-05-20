@@ -34,7 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <thread>
 #include <mutex>
 
-#include "dsys.h"
+#include "seriema.h"
 
 using std::vector;
 using std::array;
@@ -46,48 +46,48 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
-using dsys::GlobalAddress;
-using dsys::Synchronizer;
+using seriema::GlobalAddress;
+using seriema::Synchronizer;
 
-using dsys::number_processes;
-using dsys::process_rank;
-using dsys::number_threads;
-using dsys::thread_rank;
-using dsys::number_threads_process;
-using dsys::thread_id;
+using seriema::number_processes;
+using seriema::process_rank;
+using seriema::number_threads;
+using seriema::thread_rank;
+using seriema::number_threads_process;
+using seriema::thread_id;
 
-using dsys::context;
-using dsys::queue_pairs;
+using seriema::context;
+using seriema::queue_pairs;
 
-using dsys::Configuration;
+using seriema::Configuration;
 
 constexpr uint64_t number_operations = 65536;
 
 void tester_thread(int offset) {
-    dsys::init_thread(offset);
+    seriema::init_thread(offset);
 
     uint64_t received = 0;
 
     for(uint64_t iteration = 0; iteration < number_operations; iteration++) {
         // if(iteration % 1000 == 0) {
-        //     dsys::print_mutex.lock();
+        //     seriema::print_mutex.lock();
         //     cout << "ID = " << thread_id << " iteration = " << iteration << " received = " << received << endl;
-        //     dsys::print_mutex.unlock();
+        //     seriema::print_mutex.unlock();
         // }
 
         int destination_thread_id = iteration % number_threads;
-        RDMAMemory *outgoing = dsys::outgoing_allocator->allocate();
+        RDMAMemory *outgoing = seriema::outgoing_allocator->allocate();
 
         //sprintf((char *) outgoing->get_buffer(), "Hello world %d!\n", iteration);
 
         get_transmitter(destination_thread_id)->send(outgoing, 0, 3000);
     }
 
-    dsys::print_mutex.lock();
+    seriema::print_mutex.lock();
     cout << "done" << endl;
-    dsys::print_mutex.unlock();
+    seriema::print_mutex.unlock();
 
-    dsys::finalize_thread();
+    seriema::finalize_thread();
 }
 
 int main(int argc, char **argv) {
@@ -101,7 +101,7 @@ int main(int argc, char **argv) {
     number_threads_process = atoi(argv[1]);
 
     Configuration configuration{number_threads_process};
-    dsys::init_thread_handler(argc, argv, configuration);
+    seriema::init_thread_handler(argc, argv, configuration);
 
     for(int i = 0; i < number_threads_process; i++) {
         thread_list.push_back(thread(tester_thread, i));
@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
         thread_list[i].join();
     }
 
-    dsys::finalize_thread_handler();
+    seriema::finalize_thread_handler();
 
     return 0;
 }

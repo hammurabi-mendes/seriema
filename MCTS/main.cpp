@@ -44,7 +44,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cassert>
 #endif /* DEBUG */
 
-#include "dsys.h"
+#include "seriema.h"
 #include "Allocator.hpp"
 
 using std::vector;
@@ -59,23 +59,23 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
-using dsys::GlobalAddress;
+using seriema::GlobalAddress;
 
-using dsys::number_processes;
-using dsys::process_rank;
-using dsys::number_threads;
-using dsys::number_threads_process;
-using dsys::local_number_processes;
-using dsys::local_process_rank;
-using dsys::thread_rank;
-using dsys::thread_id;
+using seriema::number_processes;
+using seriema::process_rank;
+using seriema::number_threads;
+using seriema::number_threads_process;
+using seriema::local_number_processes;
+using seriema::local_process_rank;
+using seriema::thread_rank;
+using seriema::thread_id;
 
-using dsys::context;
-using dsys::queue_pairs;
+using seriema::context;
+using seriema::queue_pairs;
 
-using dsys::incoming_message_queues;
+using seriema::incoming_message_queues;
 
-using dsys::Configuration;
+using seriema::Configuration;
 
 #ifdef STATS
 #include <MPI/MPIHelper.hpp>
@@ -128,14 +128,14 @@ public:
     static constexpr uint64_t NUMBER_SIMULATIONS = 16;
 
     void initialize_board_root() {
-        board_memory = dsys::thread_context->linear_allocator->allocate(BOARD_SIZE);
+        board_memory = seriema::thread_context->linear_allocator->allocate(BOARD_SIZE);
         board = reinterpret_cast<char *>(board_memory->get_buffer());
 
         std::memset(board, 0, BOARD_SIZE * sizeof(char));
 
         turn = 1;
 
-        plays_memory = dsys::thread_context->linear_allocator->allocate(1 * sizeof(PlayRepresentation));
+        plays_memory = seriema::thread_context->linear_allocator->allocate(1 * sizeof(PlayRepresentation));
         plays = reinterpret_cast<PlayRepresentation *>(plays_memory->get_buffer());
 
         // Serialized version
@@ -145,7 +145,7 @@ public:
     }
 
     void initialize_board(PlayRepresentation *previous_plays, uint64_t number_previous_plays) {
-        board_memory = dsys::thread_context->linear_allocator->allocate(BOARD_SIZE);
+        board_memory = seriema::thread_context->linear_allocator->allocate(BOARD_SIZE);
         board = reinterpret_cast<char *>(board_memory->get_buffer());
 
         std::memset(board, 0, BOARD_SIZE * sizeof(char));
@@ -159,7 +159,7 @@ public:
         }
 
         // Allocates space for the serialized version
-        plays_memory = dsys::thread_context->linear_allocator->allocate((number_previous_plays + 1 + 1) * sizeof(PlayRepresentation));
+        plays_memory = seriema::thread_context->linear_allocator->allocate((number_previous_plays + 1 + 1) * sizeof(PlayRepresentation));
         plays = reinterpret_cast<PlayRepresentation *>(plays_memory->get_buffer());
 
         // Serialized version
@@ -214,8 +214,8 @@ public:
     }
 
     virtual ~Hex() {
-        dsys::thread_context->linear_allocator->deallocate(board_memory);
-        dsys::thread_context->linear_allocator->deallocate(plays_memory);
+        seriema::thread_context->linear_allocator->deallocate(board_memory);
+        seriema::thread_context->linear_allocator->deallocate(plays_memory);
     }
 
     void notify_expanded(uint64_t move, uint64_t number_visits) {
@@ -521,7 +521,7 @@ void move_forward() {
             best_child->set_root();
             // best_child->set_levels_remaining_descendants(0);
 
-            for(int i: dsys::get_local_thread_ids()) {
+            for(int i: seriema::get_local_thread_ids()) {
                 MCTS::global_aggregator->call(i, [best_child] {
                     root = best_child;
                 });
@@ -529,20 +529,20 @@ void move_forward() {
             }
         }
         else {
-            for(int i: dsys::get_local_thread_ids()) {
+            for(int i: seriema::get_local_thread_ids()) {
                 MCTS::global_aggregator->call(i, [best_child] {
                     root = nullptr;
                 });
                 MCTS::global_aggregator->get_child_aggregator(i)->flush();
             }
 
-            int random_thread_id = dsys::get_random_thread_id(best_child.get_process());
+            int random_thread_id = seriema::get_random_thread_id(best_child.get_process());
 
             MCTS::global_aggregator->call(random_thread_id, [best_child] {
                 best_child->set_root();
                 // best_child->set_levels_remaining_descendants(0);
 
-                for(int i: dsys::get_local_thread_ids()) {
+                for(int i: seriema::get_local_thread_ids()) {
                     MCTS::global_aggregator->call(i, [best_child] {
                         root = best_child;
                     });
@@ -566,7 +566,7 @@ void move_forward() {
 }
 
 void worker_thread(int offset) {
-    dsys::init_thread(offset);
+    seriema::init_thread(offset);
     MCTS::init_thread();
     Hex::init_thread();
 
@@ -591,7 +591,7 @@ void worker_thread(int offset) {
     while(start_synchronizer.get_number_operations_left() > 0) {
         MCTS::global_aggregator->flush_all();
 
-        dsys::flush_send_completion_queues();
+        seriema::flush_send_completion_queues();
     #ifdef DEBUG
         cout << "waiting for initial flush to complete" << endl;
     #endif /* DEBUG */
@@ -620,7 +620,7 @@ void worker_thread(int offset) {
         root = NodeAddress(new Node(0));
 #endif /* NUMA_ALLOCATOR */
 
-        for(int i: dsys::get_local_thread_ids()) {
+        for(int i: seriema::get_local_thread_ids()) {
             MCTS::global_aggregator->call(i, [root_copy = root] {
                 root = root_copy; 
             });
@@ -729,7 +729,7 @@ void worker_thread(int offset) {
     //     MCTS::global_messenger->process_calls_all();
     //     MCTS::global_aggregator->flush_all();
 
-    //     dsys::flush_send_completion_queues();
+    //     seriema::flush_send_completion_queues();
 
     // #ifdef DEBUG
     //     cout << "waiting for incoming shutdown (1)" << endl;
@@ -755,7 +755,7 @@ void worker_thread(int offset) {
     // MCTS::global_aggregator->flush_all(&finish_synchronizer);
 
     // while(finish_synchronizer.get_number_operations_left() > 0 || !MCTS::global_aggregator->flush_all()) {
-    //     dsys::flush_send_completion_queues();
+    //     seriema::flush_send_completion_queues();
     // // #ifdef DEBUG
     //     cout << "waiting for final flush to complete" << endl;
     //     sleep(1);
@@ -766,7 +766,7 @@ void worker_thread(int offset) {
     //     MCTS::global_messenger->process_calls_all();
 
     //     MCTS::global_aggregator->flush_all();
-    //     dsys::flush_send_completion_queues();
+    //     seriema::flush_send_completion_queues();
     // // #ifdef DEBUG
     //     cout << "waiting for final message to arrive" << endl;
     //     sleep(1);
@@ -778,9 +778,9 @@ void worker_thread(int offset) {
     local_thread_total_simulations[thread_rank] += thread_total_simulations;
 #endif /* STATS */
 
-    dsys::print_mutex.lock();
+    seriema::print_mutex.lock();
     cout << "done" << endl;
-    dsys::print_mutex.unlock();
+    seriema::print_mutex.unlock();
 
 #ifdef NUMA_ALLOCATOR
     delete node_allocator<Node>;
@@ -789,7 +789,7 @@ void worker_thread(int offset) {
 
     Hex::finalize_thread();
     MCTS::finalize_thread();
-    dsys::finalize_thread();
+    seriema::finalize_thread();
 }
 
 int main(int argc, char **argv) {
@@ -806,9 +806,9 @@ int main(int argc, char **argv) {
     configuration.number_service_threads = 1;
     configuration.create_completion_channel_shared = true;
 
-    dsys::init_thread_handler(argc, argv, configuration);
+    seriema::init_thread_handler(argc, argv, configuration);
 
-    MCTS::LEVELS_REMAINING_MAX = 0;//std::max(4UL, (uint64_t) std::ceil(std::log2(dsys::number_threads)));
+    MCTS::LEVELS_REMAINING_MAX = 0;//std::max(4UL, (uint64_t) std::ceil(std::log2(seriema::number_threads)));
 
 #ifdef STATS
     local_thread_total_visits = new uint64_t[number_threads_process];
@@ -835,13 +835,13 @@ int main(int argc, char **argv) {
         thread_list.emplace_back(thread(worker_thread, i));
 
         if(configuration.number_threads_process <= share_hardware_concurrency / 2) {
-            dsys::affinity_handler.set_thread_affinity(&thread_list[i], i, (local_process_rank * share_hardware_concurrency) + (2 * i));
+            seriema::affinity_handler.set_thread_affinity(&thread_list[i], i, (local_process_rank * share_hardware_concurrency) + (2 * i));
         }
         else {
-            dsys::affinity_handler.set_thread_affinity(&thread_list[i], i, (local_process_rank * share_hardware_concurrency) + i);
+            seriema::affinity_handler.set_thread_affinity(&thread_list[i], i, (local_process_rank * share_hardware_concurrency) + i);
         }
 
-        cout << "Numa zone for prank " << i << ": " << dsys::affinity_handler.get_numa_zone(i) << endl;
+        cout << "Numa zone for prank " << i << ": " << seriema::affinity_handler.get_numa_zone(i) << endl;
     }
 
     // NOTE: In case we want to pin the service thread
@@ -850,10 +850,10 @@ int main(int argc, char **argv) {
 
     // for(int i = 0; i < configuration.number_service_threads; i++) {
     //     if(configuration.number_threads_process <= share_hardware_concurrency / 2) {
-    //         dsys::affinity_handler.set_thread_affinity(dsys::service_threads[i], (local_process_rank * share_hardware_concurrency) + share_hardware_concurrency - last_service_offset - (2 * i));
+    //         seriema::affinity_handler.set_thread_affinity(seriema::service_threads[i], (local_process_rank * share_hardware_concurrency) + share_hardware_concurrency - last_service_offset - (2 * i));
     //     }
     //     else if(configuration.number_threads_process <= share_hardware_concurrency - configuration.number_service_threads) {
-    //         dsys::affinity_handler.set_thread_affinity(dsys::service_threads[i], (local_process_rank * share_hardware_concurrency) + share_hardware_concurrency - 1 - i);
+    //         seriema::affinity_handler.set_thread_affinity(seriema::service_threads[i], (local_process_rank * share_hardware_concurrency) + share_hardware_concurrency - 1 - i);
     //     }
     // }
 
@@ -977,7 +977,7 @@ int main(int argc, char **argv) {
     delete[] MCTS::simulation_queues;
 #endif /* !NO_SIMULATION_QUEUES */ 
 
-    dsys::finalize_thread_handler();
+    seriema::finalize_thread_handler();
 
     return 0;
 }

@@ -35,8 +35,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "remote_calls.hpp"
 #include "rdma_messengers.hpp"
 
-using dsys::RDMAMessenger;
-using dsys::RDMAMessengerGlobal;
+using seriema::RDMAMessenger;
+using seriema::RDMAMessengerGlobal;
 
 using std::vector;
 using std::queue;
@@ -44,7 +44,7 @@ using std::queue;
 using std::mutex;
 using std::lock_guard;
 
-namespace dsys {
+namespace seriema {
 
 template<typename F>
 constexpr int pack_size(F &&function) noexcept {
@@ -126,11 +126,11 @@ public:
 
     virtual ~RDMAAggregator() {
     #ifdef STATS
-        dsys::print_mutex.lock();
+        seriema::print_mutex.lock();
         cout << "Stats for aggregator " << thread_id << "/" << destination_thread_id << endl;
         cout << "number_allocations: " << number_allocations << endl;
         cout << "maximum_allocations: " << maximum_allocations << endl;
-        dsys::print_mutex.unlock();
+        seriema::print_mutex.unlock();
     #endif /* STATS */
     }
 
@@ -413,7 +413,7 @@ public:
         }
 
 #ifdef DIRECT_LOCAL_CALLS
-        int destination_process_rank = (destination_thread_id / dsys::number_threads_process);
+        int destination_process_rank = (destination_thread_id / seriema::number_threads_process);
 
         if(destination_process_rank == process_rank) {
             function();
@@ -463,7 +463,7 @@ public:
         }
 
 #ifdef DIRECT_LOCAL_CALLS
-        int destination_process_rank = (destination_thread_id / dsys::number_threads_process);
+        int destination_process_rank = (destination_thread_id / seriema::number_threads_process);
 
         if(destination_process_rank == process_rank) {
             function(buffer, size);
@@ -513,7 +513,7 @@ public:
         }
 
 #ifdef DIRECT_LOCAL_CALLS
-        int destination_process_rank = (destination_thread_id / dsys::number_threads_process);
+        int destination_process_rank = (destination_thread_id / seriema::number_threads_process);
 
         if(destination_process_rank == process_rank) {
             function(buffer, size);
@@ -638,15 +638,15 @@ protected:
 public:
     template<typename... Args>
     RDMAAggregatorGlobal(Messenger *flush_messenger, Args &&... args): flush_messenger{flush_messenger} {
-        aggregators.resize(dsys::number_threads);
+        aggregators.resize(seriema::number_threads);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             aggregators[i] = new ChildAggregator(new ChunkMemoryAllocator(thread_context->global_allocator, 1), flush_messenger->get_messenger(i), i, std::forward<Args>(args)...);
         }
     }
 
     virtual ~RDMAAggregatorGlobal() {
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             delete aggregators[i];
         }
     }
@@ -671,7 +671,7 @@ public:
     inline bool flush_all(Synchronizer *synchronizer = nullptr) noexcept {
         bool result = true;
 
-        for(int destination_thread_id = 0; destination_thread_id < dsys::number_threads; destination_thread_id++) {
+        for(int destination_thread_id = 0; destination_thread_id < seriema::number_threads; destination_thread_id++) {
             result &= aggregators[destination_thread_id]->flush(synchronizer);
         }
 
@@ -683,7 +683,7 @@ public:
     }
 
     inline void shutdown_all(Synchronizer *synchronizer = nullptr) noexcept {
-        for(int destination_thread_id = 0; destination_thread_id < dsys::number_threads; destination_thread_id++) {
+        for(int destination_thread_id = 0; destination_thread_id < seriema::number_threads; destination_thread_id++) {
             shutdown(destination_thread_id, synchronizer);
         }
     }
@@ -697,7 +697,7 @@ public:
     }
 
     inline void reset_all() noexcept {
-        for(int destination_thread_id = 0; destination_thread_id < dsys::number_threads; destination_thread_id++) {
+        for(int destination_thread_id = 0; destination_thread_id < seriema::number_threads; destination_thread_id++) {
             reset(destination_thread_id);
         }
     }
@@ -758,7 +758,7 @@ public:
             while(true) {
                 usleep(microseconds);
 
-                for(int i = 0; i < dsys::number_threads; i++) {
+                for(int i = 0; i < seriema::number_threads; i++) {
                     RDMAAggregatorGlobal<Messenger, ChildAggregator>::aggregators[i].flush();
                 }
 
@@ -772,6 +772,6 @@ public:
     }
 };
 
-} // namespace dsys
+} // namespace seriema
 
 #endif /* RDMA_AGGREGATOR_H */

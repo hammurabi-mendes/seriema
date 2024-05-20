@@ -9,7 +9,7 @@
 
 #include <mpi.h>
 
-#include "dsys.h"
+#include "seriema.h"
 
 #include "utils/SerializationBuffer.hpp"
 
@@ -78,15 +78,15 @@ struct MPIHelper {
 	 * The new MPI communicator is created over \p oldCommunicator.
 	 */
     static inline int createCompleteGraph(MPI_Comm oldCommunicator, MPI_Comm *newCommunicator) {
-        vector<int> sources(dsys::number_threads);
-        vector<int> destinations(dsys::number_threads);
+        vector<int> sources(seriema::number_threads);
+        vector<int> destinations(seriema::number_threads);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             sources[i] = i;
             destinations[i] = i;
         }
 
-        int returnValue = MPI_Dist_graph_create_adjacent(oldCommunicator, dsys::number_threads, &sources[0], MPI_UNWEIGHTED, dsys::number_threads, &destinations[0], MPI_UNWEIGHTED, MPI_INFO_NULL, 0, newCommunicator);
+        int returnValue = MPI_Dist_graph_create_adjacent(oldCommunicator, seriema::number_threads, &sources[0], MPI_UNWEIGHTED, seriema::number_threads, &destinations[0], MPI_UNWEIGHTED, MPI_INFO_NULL, 0, newCommunicator);
 
         return returnValue;
     }
@@ -103,7 +103,7 @@ struct MPIHelper {
 	 *                      and number of records to be received by each process.
 	 */
     template<typename T>
-    static inline void doScatter(T *sendBuffer, T *recvBuffer, int root, MPI_Datatype datatype, int numberRecords = 1, MPI_Request &request = dsys::global_request) {
+    static inline void doScatter(T *sendBuffer, T *recvBuffer, int root, MPI_Datatype datatype, int numberRecords = 1, MPI_Request &request = seriema::global_request) {
         MPI_CHECK(MPI_Scatter(sendBuffer, numberRecords, datatype, recvBuffer, numberRecords, datatype, root, MPI_COMM_WORLD));
     }
 
@@ -143,7 +143,7 @@ struct MPIHelper {
 	 *                      and number of records to be sent by each process.
 	 */
     template<typename T>
-    static inline void doGather(T *sendBuffer, T *recvBuffer, int root, MPI_Datatype datatype, int numberRecords = 1, MPI_Request &request = dsys::global_request) {
+    static inline void doGather(T *sendBuffer, T *recvBuffer, int root, MPI_Datatype datatype, int numberRecords = 1, MPI_Request &request = seriema::global_request) {
         MPI_CHECK(MPI_Gather(sendBuffer, numberRecords, datatype, recvBuffer, numberRecords, datatype, root, MPI_COMM_WORLD));
     }
 
@@ -182,7 +182,7 @@ struct MPIHelper {
 	 *                      and number of records to be sent by each process.
 	 */
     template<typename T>
-    static inline void doAllGather(T *sendBuffer, T *recvBuffer, MPI_Datatype datatype, int numberRecords = 1, MPI_Request &request = dsys::global_request) {
+    static inline void doAllGather(T *sendBuffer, T *recvBuffer, MPI_Datatype datatype, int numberRecords = 1, MPI_Request &request = seriema::global_request) {
         MPI_CHECK(MPI_Allgather(sendBuffer, numberRecords, datatype, recvBuffer, numberRecords, datatype, MPI_COMM_WORLD));
     }
 
@@ -333,13 +333,13 @@ struct MPIHelper {
 	 */
     template<typename T>
     static inline void smallAllToAllV(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype datatype) {
-        vector<int> intSendSizes(dsys::number_threads);
-        vector<int> intRecvSizes(dsys::number_threads);
+        vector<int> intSendSizes(seriema::number_threads);
+        vector<int> intRecvSizes(seriema::number_threads);
 
-        vector<int> intSendOffsets(dsys::number_threads);
-        vector<int> intRecvOffsets(dsys::number_threads);
+        vector<int> intSendOffsets(seriema::number_threads);
+        vector<int> intRecvOffsets(seriema::number_threads);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             intSendSizes[i] = static_cast<int>(sendSizes[i]);
             intRecvSizes[i] = static_cast<int>(recvSizes[i]);
 
@@ -364,19 +364,19 @@ struct MPIHelper {
      * @param request MPI request that defaults to the thread_local global_request from dsys.
 	 */
     template<typename T>
-    static void largeAllToAllV(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype datatype, MPI_Request &request = dsys::global_request) {
-        vector<int> newSendSizes(dsys::number_threads);
-        vector<MPI_Datatype> newSendTypes(dsys::number_threads);
-        vector<MPI_Aint> newSendOffsets(dsys::number_threads);
+    static void largeAllToAllV(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype datatype, MPI_Request &request = seriema::global_request) {
+        vector<int> newSendSizes(seriema::number_threads);
+        vector<MPI_Datatype> newSendTypes(seriema::number_threads);
+        vector<MPI_Aint> newSendOffsets(seriema::number_threads);
 
-        vector<int> newRecvSizes(dsys::number_threads);
-        vector<MPI_Datatype> newRecvTypes(dsys::number_threads);
-        vector<MPI_Aint> newRecvOffsets(dsys::number_threads);
+        vector<int> newRecvSizes(seriema::number_threads);
+        vector<MPI_Datatype> newRecvTypes(seriema::number_threads);
+        vector<MPI_Aint> newRecvOffsets(seriema::number_threads);
 
         MPI_Aint typeSize;
         getDatatypeExtent(datatype, &typeSize);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             newSendSizes[i] = 1;
             newRecvSizes[i] = 1;
 
@@ -395,7 +395,7 @@ struct MPIHelper {
 
         MPI_Comm_free(&completeGraph);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             MPI_Type_free(&newSendTypes[i]);
             MPI_Type_free(&newRecvTypes[i]);
         }
@@ -414,7 +414,7 @@ struct MPIHelper {
      * @param request MPI request that defaults to the thread_local global_request from dsys
 	 */
     template<typename T>
-    static inline void doAllToAllW(T *sendBuffer, int *sendSizes, int *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, int *recvSizes, int *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = dsys::global_request) {
+    static inline void doAllToAllW(T *sendBuffer, int *sendSizes, int *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, int *recvSizes, int *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = seriema::global_request) {
         MPI_CHECK(MPI_Alltoallw(sendBuffer, sendSizes, sendOffsets, sendTypes, recvBuffer, recvSizes, recvOffsets, recvTypes, MPI_COMM_WORLD));
     }
 
@@ -451,13 +451,13 @@ struct MPIHelper {
 	 */
     template<typename T>
     static inline void smallAllToAllW(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes) {
-        vector<int> intSendSizes(dsys::number_threads);
-        vector<int> intRecvSizes(dsys::number_threads);
+        vector<int> intSendSizes(seriema::number_threads);
+        vector<int> intRecvSizes(seriema::number_threads);
 
-        vector<int> intSendOffsets(dsys::number_threads);
-        vector<int> intRecvOffsets(dsys::number_threads);
+        vector<int> intSendOffsets(seriema::number_threads);
+        vector<int> intRecvOffsets(seriema::number_threads);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             intSendSizes[i] = static_cast<int>(sendSizes[i]);
             intRecvSizes[i] = static_cast<int>(recvSizes[i]);
 
@@ -482,16 +482,16 @@ struct MPIHelper {
      * @param request MPI request that defaults to the thread_local global_request from dsys
 	 */
     template<typename T>
-    static inline void largeAllToAllW(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = dsys::global_request) {
-        vector<int> newSendSizes(dsys::number_threads);
-        vector<MPI_Datatype> newSendTypes(dsys::number_threads);
-        vector<MPI_Aint> newSendOffsets(dsys::number_threads);
+    static inline void largeAllToAllW(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = seriema::global_request) {
+        vector<int> newSendSizes(seriema::number_threads);
+        vector<MPI_Datatype> newSendTypes(seriema::number_threads);
+        vector<MPI_Aint> newSendOffsets(seriema::number_threads);
 
-        vector<int> newRecvSizes(dsys::number_threads);
-        vector<MPI_Datatype> newRecvTypes(dsys::number_threads);
-        vector<MPI_Aint> newRecvOffsets(dsys::number_threads);
+        vector<int> newRecvSizes(seriema::number_threads);
+        vector<MPI_Datatype> newRecvTypes(seriema::number_threads);
+        vector<MPI_Aint> newRecvOffsets(seriema::number_threads);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             newSendSizes[i] = 1;
             newRecvSizes[i] = 1;
 
@@ -510,7 +510,7 @@ struct MPIHelper {
 
         MPI_Comm_free(&completeGraph);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             MPI_Type_free(&newSendTypes[i]);
             MPI_Type_free(&newRecvTypes[i]);
         }
@@ -571,7 +571,7 @@ struct MPIHelper {
 	 */
     template<typename T, typename G>
     static T reduce(T *elements, int count, T &initialValue, G reduceGlobal) {
-        vector<T> locals(dsys::number_threads);
+        vector<T> locals(seriema::number_threads);
 
         doAllToAll(&initialValue, &locals[0]);
 
@@ -590,7 +590,7 @@ struct MPIHelper {
     static T reduce(T *elements, int count, T &initialValue, F reduceLocal, G reduceGlobal) {
         T local = accumulate(elements, elements + count, initialValue, reduceLocal);
 
-        vector<T> locals(dsys::number_threads);
+        vector<T> locals(seriema::number_threads);
 
         doAllToAll(&local, &locals[0]);
 
@@ -639,16 +639,16 @@ struct MPIHelper {
 		 * Constructor for the dynamic setting, which means that the user
 		 * allocates and manipulates send data in the per-core send buffers.
 		 */
-        AllToAllContext() : sendSizes(dsys::number_threads), recvSizes(dsys::number_threads), sendOffsets(dsys::number_threads), recvOffsets(dsys::number_threads), sendSizeTotal{0UL}, recvSizeTotal{0UL}, dynamic{true} {
-            sendBuffers.resize(dsys::number_threads);
-            recvBuffers.resize(dsys::number_threads);
+        AllToAllContext() : sendSizes(seriema::number_threads), recvSizes(seriema::number_threads), sendOffsets(seriema::number_threads), recvOffsets(seriema::number_threads), sendSizeTotal{0UL}, recvSizeTotal{0UL}, dynamic{true} {
+            sendBuffers.resize(seriema::number_threads);
+            recvBuffers.resize(seriema::number_threads);
         }
 
         /**
 		 * Constructor for the non-dynamic setting, which means that the user
 		 * pre-allocates a single master buffer, while manipulates slave buffers.
 		 */
-        AllToAllContext(vector<uint64_t> &sendSizes) : sendSizes{sendSizes}, recvSizes(dsys::number_threads), sendOffsets(dsys::number_threads), recvOffsets(dsys::number_threads), sendSizeTotal{0UL}, recvSizeTotal{0UL}, dynamic{false} {
+        AllToAllContext(vector<uint64_t> &sendSizes) : sendSizes{sendSizes}, recvSizes(seriema::number_threads), sendOffsets(seriema::number_threads), recvOffsets(seriema::number_threads), sendSizeTotal{0UL}, recvSizeTotal{0UL}, dynamic{false} {
             // Initialize sizes and prepare per-core buffers
             prepare();
         }
@@ -659,7 +659,7 @@ struct MPIHelper {
         inline void perform() {
             if(dynamic) {
                 // Initialize sizes and prepare per-core buffers
-                for(int core = 0; core < dsys::number_threads; core++) {
+                for(int core = 0; core < seriema::number_threads; core++) {
                     sendSizes[core] = sendBuffers[core].used;
                 }
 

@@ -75,7 +75,7 @@ using std::cerr;
 using std::endl;
 using std::ios;
 
-namespace dsys {
+namespace seriema {
 
 /*
  * Definitions
@@ -186,7 +186,7 @@ extern int number_queue_pairs;
 
 inline uint64_t get_transmitter_index(int destination_thread_id) noexcept {
 #ifdef DEBUG
-    assert(destination_thread_id < dsys::number_threads);
+    assert(destination_thread_id < seriema::number_threads);
 #endif /* DEBUG */
     uint64_t destination_process_rank = destination_thread_id / number_threads_process;
     uint64_t destination_thread_rank = destination_thread_id % number_threads_process;
@@ -196,7 +196,7 @@ inline uint64_t get_transmitter_index(int destination_thread_id) noexcept {
 
 inline IBTransmitter<QP_GLOBAL_FLUSH_INTERVAL, QP_THREAD_FLUSH_INTERVAL> *get_transmitter(int destination_thread_id) noexcept {
 #ifdef DEBUG
-    assert(destination_thread_id < dsys::number_threads);
+    assert(destination_thread_id < seriema::number_threads);
 #endif /* DEBUG */
     return transmitters[get_transmitter_index(destination_thread_id)];
 }
@@ -212,11 +212,11 @@ inline int get_thread_rank(int thread_id) noexcept {
 inline int get_random_thread_id(int process_rank) noexcept { 
     return (process_rank * number_threads_process) + Random<int>::getRandom(0, number_threads_process - 1);
 }
-}; // namespace dsys
+}; // namespace seriema
 
 #include "memory_allocation.hpp"
 
-namespace dsys {
+namespace seriema {
 extern FastQueuePC<ReceivedMessageInformation> *incoming_message_queues;
 extern FastQueuePC<RDMAMemory *> *incoming_memory_queues;
 
@@ -295,6 +295,6 @@ inline vector<int> &get_local_thread_ids() {
     return local_thread_ids;
 }
 
-}; // namespace dsys
+}; // namespace seriema
 
 #endif /* THREAD_HANDLER_H */

@@ -34,7 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <thread>
 #include <mutex>
 
-#include "dsys.h"
+#include "seriema.h"
 #include "utils/TimeHolder.hpp"
 
 using std::vector;
@@ -47,26 +47,26 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
-using dsys::GlobalAddress;
+using seriema::GlobalAddress;
 
-using dsys::number_processes;
-using dsys::process_rank;
-using dsys::number_threads;
-using dsys::number_threads_process;
-using dsys::local_number_processes;
-using dsys::local_process_rank;
-using dsys::thread_rank;
-using dsys::thread_id;
+using seriema::number_processes;
+using seriema::process_rank;
+using seriema::number_threads;
+using seriema::number_threads_process;
+using seriema::local_number_processes;
+using seriema::local_process_rank;
+using seriema::thread_rank;
+using seriema::thread_id;
 
-using dsys::context;
-using dsys::queue_pairs;
+using seriema::context;
+using seriema::queue_pairs;
 
-using dsys::incoming_message_queues;
+using seriema::incoming_message_queues;
 
-using dsys::RDMAMessengerGlobal;
-using dsys::RDMAAggregatorGlobal;
+using seriema::RDMAMessengerGlobal;
+using seriema::RDMAAggregatorGlobal;
 
-using dsys::Configuration;
+using seriema::Configuration;
 
 constexpr uint64_t number_operations = 65536000;
 
@@ -76,7 +76,7 @@ static atomic<bool> finished = false;
 #define BUFFER_SIZE 4096
 
 void worker_thread(int offset) {
-    dsys::init_thread(offset);
+    seriema::init_thread(offset);
 
     FastQueuePC<ReceivedMessageInformation> &my_incoming_message_queue = incoming_message_queues[thread_rank];
 
@@ -132,9 +132,9 @@ void worker_thread(int offset) {
         double message_rate = ((double) (number_operations * 1000000000ULL)) / nanosecond_difference;
         double bandwidth = ((double) (number_operations * function_size)) / (1024 * 1024) / (((double) nanosecond_difference) / 1000000000ULL);
 
-        dsys::print_mutex.lock();
+        seriema::print_mutex.lock();
         printf("Rate: %.2f messages/s\nBandwidth: %.2f MB/s\n", message_rate, bandwidth);
-        dsys::print_mutex.unlock();
+        seriema::print_mutex.unlock();
     }
 
     Synchronizer flush_synchronizer{(uint64_t) number_threads};
@@ -152,11 +152,11 @@ void worker_thread(int offset) {
         cout << "waiting for incoming shutdown (2)" << endl;
     }
 
-    dsys::print_mutex.lock();
+    seriema::print_mutex.lock();
     cout << "done" << endl;
-    dsys::print_mutex.unlock();
+    seriema::print_mutex.unlock();
 
-    dsys::finalize_thread();
+    seriema::finalize_thread();
 }
 
 int main(int argc, char **argv) {
@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
 Configuration configuration{number_threads_process, true, false};
     configuration.number_service_threads = 1;
 
-    dsys::init_thread_handler(argc, argv, configuration);
+    seriema::init_thread_handler(argc, argv, configuration);
 
     const unsigned int share_hardware_concurrency = std::thread::hardware_concurrency() / local_number_processes;
 
@@ -182,10 +182,10 @@ Configuration configuration{number_threads_process, true, false};
         thread_list.emplace_back(thread(worker_thread, i));
 
         if(configuration.number_service_threads == 1) {
-            dsys::affinity_handler.set_thread_affinity(&thread_list[i], (local_process_rank * share_hardware_concurrency) + i);
+            seriema::affinity_handler.set_thread_affinity(&thread_list[i], (local_process_rank * share_hardware_concurrency) + i);
         }
         else if(configuration.number_service_threads > 1 && configuration.number_threads_process <= std::thread::hardware_concurrency() / 2) {
-            dsys::affinity_handler.set_thread_affinity(&thread_list[i], (local_process_rank * share_hardware_concurrency) + (2 * i));
+            seriema::affinity_handler.set_thread_affinity(&thread_list[i], (local_process_rank * share_hardware_concurrency) + (2 * i));
         }
     }
 
@@ -193,7 +193,7 @@ Configuration configuration{number_threads_process, true, false};
         thread_list[i].join();
     }
 
-    dsys::finalize_thread_handler();
+    seriema::finalize_thread_handler();
 
     return 0;
 }

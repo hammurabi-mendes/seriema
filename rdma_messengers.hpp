@@ -36,7 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 using std::deque;
 
-namespace dsys {
+namespace seriema {
 
 extern Mapper<uint64_t> messenger_map;
 
@@ -316,7 +316,7 @@ public:
                 self_memory = new RDMAMemory(context, this, sizeof(RDMAMessenger<NUMBER_CHUNKS_MAXIMUM>));
             } 
 
-            dsys::call_service(destination_thread_id, [source_thread_id = thread_id, destination_thread_id = this->destination_thread_id, request_header_locator = RDMAMemoryLocator{request_memory}, source_memory_locator = RDMAMemoryLocator{self_memory}] {
+            seriema::call_service(destination_thread_id, [source_thread_id = thread_id, destination_thread_id = this->destination_thread_id, request_header_locator = RDMAMemoryLocator{request_memory}, source_memory_locator = RDMAMemoryLocator{self_memory}] {
                 RDMAMemory *response = thread_context->fine_outgoing_allocator->allocate_outgoing(sizeof(RetrievalHeader));
 
                 RetrievalHeader *response_object = reinterpret_cast<RetrievalHeader *>(response->get_buffer());
@@ -350,9 +350,9 @@ public:
 
         if(!request_header->done) {
 #ifdef DEBUG
-            dsys::print_mutex.lock();
+            seriema::print_mutex.lock();
             cout << "Waiting for external memory" << endl;
-            dsys::print_mutex.unlock();
+            seriema::print_mutex.unlock();
 #endif /* DEBUG */
             return false;
         }
@@ -563,7 +563,7 @@ public:
     template<typename F>
     inline bool call(int destination_thread_id, F &&function, Synchronizer *synchronizer = nullptr) noexcept {
 #ifdef DIRECT_LOCAL_CALLS
-        int destination_process_rank = (destination_thread_id / dsys::number_threads_process);
+        int destination_process_rank = (destination_thread_id / seriema::number_threads_process);
 
         if(destination_process_rank == process_rank) {
             function();
@@ -690,7 +690,7 @@ public:
     template<typename F>
     inline bool call_buffer(int destination_thread_id, F &&function, RDMAMemory *local_memory, uint64_t offset, uint64_t size, Synchronizer *synchronizer = nullptr) noexcept {
 #ifdef DIRECT_LOCAL_CALLS
-        int destination_process_rank = (destination_thread_id / dsys::number_threads_process);
+        int destination_process_rank = (destination_thread_id / seriema::number_threads_process);
 
         if(destination_process_rank == process_rank) {
             function(buffer, size);
@@ -728,7 +728,7 @@ public:
     template<typename F>
     inline bool call_buffer(int destination_thread_id, F &&function, void *data, uint64_t size, Synchronizer *synchronizer = nullptr) noexcept {
 #ifdef DIRECT_LOCAL_CALLS
-        int destination_process_rank = (destination_thread_id / dsys::number_threads_process);
+        int destination_process_rank = (destination_thread_id / seriema::number_threads_process);
 
         if(destination_process_rank == process_rank) {
             function(buffer, size);
@@ -783,15 +783,15 @@ protected:
 public:
     template<typename... Args>
     RDMAMessengerGlobal(Args &&... args) {
-        messengers.resize(dsys::number_threads);
+        messengers.resize(seriema::number_threads);
 
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             messengers[i] = new ChildMessenger(i, std::forward<Args>(args)...);
         }
     }
 
     virtual ~RDMAMessengerGlobal() {
-        for(int i = 0; i < dsys::number_threads; i++) {
+        for(int i = 0; i < seriema::number_threads; i++) {
             delete messengers[i];
         }
     }
@@ -817,7 +817,7 @@ public:
     }
 
     inline void shutdown_all(Synchronizer *synchronizer = nullptr) noexcept {
-        for(int destination_thread_id = 0; destination_thread_id < dsys::number_threads; destination_thread_id++) {
+        for(int destination_thread_id = 0; destination_thread_id < seriema::number_threads; destination_thread_id++) {
             shutdown(destination_thread_id, synchronizer);
         }
     }
@@ -827,7 +827,7 @@ public:
     }
 
     inline bool get_incoming_shutdown_all() noexcept {
-        for(int destination_thread_id = 0; destination_thread_id < dsys::number_threads; destination_thread_id++) {
+        for(int destination_thread_id = 0; destination_thread_id < seriema::number_threads; destination_thread_id++) {
             if(!messengers[destination_thread_id]->get_incoming_shutdown()) {
                 return false;
             }
@@ -866,7 +866,7 @@ public:
     inline uint64_t process_calls_all() noexcept {
         uint64_t total = 0;
 
-        for(int destination_thread_id = 0; destination_thread_id < dsys::number_threads; destination_thread_id++) {
+        for(int destination_thread_id = 0; destination_thread_id < seriema::number_threads; destination_thread_id++) {
             total += messengers[destination_thread_id]->process_calls();
         }
 
@@ -874,6 +874,6 @@ public:
     }
 };
 
-} // namespace dsys
+} // namespace seriema
 
 #endif /* RDMA_MESSENGER_H */

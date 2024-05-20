@@ -40,7 +40,7 @@ using std::cerr;
 using std::errc;
 using std::system_error;
 
-namespace dsys {
+namespace seriema {
 
 constexpr uint64_t FLAGS_MASK = 0xffff000000000000;
 constexpr uint64_t REFERENCE_MASK = 0x0000ffffffffffff;
@@ -56,22 +56,22 @@ public:
     GlobalAddress<T>(): GlobalAddress(nullptr) {
         address = 0;
 
-        process_thread = ((dsys::process_rank & THREAD_MASK) << 32);
-        process_thread = process_thread | (dsys::thread_rank);
+        process_thread = ((seriema::process_rank & THREAD_MASK) << 32);
+        process_thread = process_thread | (seriema::thread_rank);
     }
 
     GlobalAddress<T>(T *object_address) {
         address = reinterpret_cast<uint64_t>(object_address);
 
-        process_thread = ((dsys::process_rank & THREAD_MASK) << 32);
-        process_thread = process_thread | (dsys::thread_rank & THREAD_MASK);
+        process_thread = ((seriema::process_rank & THREAD_MASK) << 32);
+        process_thread = process_thread | (seriema::thread_rank & THREAD_MASK);
     }
 
     GlobalAddress<T>(T &object_reference) {
         address = reinterpret_cast<uint64_t>(&object_reference);
 
-        process_thread = ((dsys::process_rank & THREAD_MASK) << 32);
-        process_thread = process_thread | (dsys::thread_rank & THREAD_MASK);
+        process_thread = ((seriema::process_rank & THREAD_MASK) << 32);
+        process_thread = process_thread | (seriema::thread_rank & THREAD_MASK);
     }
 
     GlobalAddress<T>(const GlobalAddress<T> &other) {
@@ -90,7 +90,7 @@ public:
     }
 
     inline uint64_t get_thread_id() const noexcept {
-        return (get_process() * dsys::number_threads_process) + get_thread_rank();
+        return (get_process() * seriema::number_threads_process) + get_thread_rank();
     }
 
     inline uint64_t get_thread_rank() const noexcept {
@@ -127,10 +127,10 @@ public:
     }
 };
 
-} // namespace dsys
+} // namespace seriema
 
 template<typename T>
-std::ostream &operator<<(std::ostream &output, const dsys::GlobalAddress<T> &address) {
+std::ostream &operator<<(std::ostream &output, const seriema::GlobalAddress<T> &address) {
     output << "(" << address.get_process() << "/" << address.get_address() << ")";
 
     return output;

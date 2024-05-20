@@ -36,11 +36,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using std::vector;
 
 #ifdef DSYS_H
-namespace dsys {
+namespace seriema {
   extern thread_local int thread_id;
 };
 
-using dsys::thread_id;
+using seriema::thread_id;
 #else
 extern thread_local int thread_id;
 #endif /* DSYS_H */

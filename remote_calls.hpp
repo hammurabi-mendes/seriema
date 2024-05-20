@@ -52,7 +52,7 @@ using std::defer_lock;
 using std::cout;
 using std::endl;
 
-namespace dsys {
+namespace seriema {
 
 template<typename T>
 class FunctionWrapper {
@@ -418,7 +418,7 @@ inline uint64_t process_work_queue(FastQueuePC<ReceivedMessageInformation> &work
 
     ReceivedMessageInformation *received_message_information = work_queue.receive(outstanding_requests);
 
-    uint64_t processed_requests = dsys::process_received_messages(received_message_information, outstanding_requests);
+    uint64_t processed_requests = seriema::process_received_messages(received_message_information, outstanding_requests);
 
     if(outstanding_requests > 0) {
         work_queue.pop_receive(outstanding_requests);
@@ -429,17 +429,17 @@ inline uint64_t process_work_queue(FastQueuePC<ReceivedMessageInformation> &work
 
 inline thread *get_work_queue_consumer(uint64_t offset, atomic<bool> &finished, FastQueuePC<ReceivedMessageInformation> &work_queue, const uint64_t sleep_nanoseconds = 0) {
     thread *work_queue_consumer = new thread([offset, &finished, &work_queue, sleep_nanoseconds] {
-        dsys::init_thread(offset);
+        seriema::init_thread(offset);
 
         while(!finished) {
-            if(dsys::process_work_queue(work_queue) == 0) {
+            if(seriema::process_work_queue(work_queue) == 0) {
                 if(sleep_nanoseconds) {
                     usleep(sleep_nanoseconds);
                 }
             }
         }
 
-        dsys::finalize_thread();
+        seriema::finalize_thread();
     });
 
     return work_queue_consumer;
@@ -663,7 +663,7 @@ inline void call_register(int destination_thread_id, F &&function, G &&user_noti
     Synchronizer *callback_synchronizer = new Synchronizer(1, Synchronizer::FLAGS_CALLBACK | Synchronizer::FLAGS_SELFDESTRUCT);
 
     callback_synchronizer->set_callback([thread_id = thread_id, user_notify_function] {
-        dsys::call(thread_id, user_notify_function);
+        seriema::call(thread_id, user_notify_function);
     });
 
     call_register(destination_thread_id, function, callback_synchronizer);
@@ -708,7 +708,7 @@ inline void async_read_call(int source_thread_id, F &&function, RDMAMemory *loca
     Synchronizer *rdma_synchronizer = new Synchronizer(1, Synchronizer::FLAGS_CALLBACK | Synchronizer::FLAGS_SELFDESTRUCT);
 
     rdma_synchronizer->set_callback([thread_id = thread_id, function, local_memory, size, source_thread_id, synchronizer] {
-        dsys::call(thread_id, [function, local_memory, size, source_thread_id, synchronizer] {
+        seriema::call(thread_id, [function, local_memory, size, source_thread_id, synchronizer] {
             function(local_memory->get_buffer(), size);
 
             thread_context->linear_allocator->deallocate(local_memory);
@@ -725,7 +725,7 @@ inline auto async_write_call(int destination_thread_id, F &&function, RDMAMemory
     Synchronizer *rdma_synchronizer = new Synchronizer(1, Synchronizer::FLAGS_CALLBACK | Synchronizer::FLAGS_SELFDESTRUCT);
 
     rdma_synchronizer->set_callback([destination_thread_id, function, buffer = remote_memory_locator.get_buffer(), size, source_thread_id = thread_id, synchronizer] {
-        dsys::call(destination_thread_id, [function, buffer, size, source_thread_id, synchronizer]() {
+        seriema::call(destination_thread_id, [function, buffer, size, source_thread_id, synchronizer]() {
             function(buffer, size);
         }, synchronizer);
     });
@@ -945,6 +945,6 @@ inline void call_buffer_everyone(F &&function, RDMAMemory **local_memories, uint
     }
 }
 
-}; // namespace dsys
+}; // namespace seriema
 
 #endif /* REMOTE_CALLS_HPP */
