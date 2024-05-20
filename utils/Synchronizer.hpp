@@ -114,7 +114,7 @@ public:
         return number_operations_left.load(std::memory_order_relaxed);
     }
 
-    inline uint64_t spin_nonzero_operations_left() const noexcept {
+    inline void spin_nonzero_operations_left() const noexcept {
         while(get_number_operations_left() > 0) {
             dsys::flush_send_completion_queues();
         }
@@ -150,7 +150,7 @@ public:
             delete callback_data;
         }
 
-        callback_data = new atomic<std::function<void()>>{function};
+        callback_data = function;
 
         flags |= FLAGS_CALLBACK; // Essential that this is the last operation for synchronization
     }

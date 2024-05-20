@@ -34,6 +34,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <unistd.h>
 #include <fcntl.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Create an accept socket in the specified \p port.
  *
@@ -71,5 +75,9 @@ void get_peer_information(int socket, char *host_string, int host_length, int *p
 void make_nonblocking(int socket, int flag);
 
 int connect_server(const char* destination_address, uint16_t port);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* NETWORKING_H */
