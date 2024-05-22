@@ -36,6 +36,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "networking.h"
 #include "ibutils.hpp"
 
+#include "utils/TimeHolder.hpp"
+
 using std::thread;
 using std::recursive_mutex;
 
@@ -104,7 +106,7 @@ void server_or_client() {
     queue_pair.setup(&context, qpinfo_incoming.number, qpinfo_incoming.lid);
 
     Synchronizer synchronizer{1};
-    sprintf((char *) outgoing_memory[0]->get_buffer(), "Hello world 0!\n");
+    sprintf((char *) outgoing_memory[0]->get_buffer(), "Hello %s!\n", server ? "client" : "server");
 
     queue_pair.post_send(outgoing_memory[0], 0, 4096, IBV_SEND_SIGNALED, nullptr, &synchronizer);
 
@@ -123,34 +125,48 @@ void server_or_client() {
         context.post_receive(incoming);
     }
 
-    for(uint64_t iteration = 0; iteration < number_operations; iteration++) {
-        sprintf((char *) outgoing_memory[iteration % outgoing_memory.size()]->get_buffer(), "Hello world %lu!\n", iteration);
+    if(server) {
+        for(uint64_t iteration = 0; iteration < number_operations; iteration++) {
+            ReceivedMessageInformation received_message_information;
+            while(context.completion_queues->poll_recv_completion_queue(&received_message_information) == 0) {
+            }
 
-        if(iteration % 128 == 0) {
-            synchronizer.reset(1);
+            RDMAMemory *incoming = received_message_information.get_memory();
+            if(iteration % 1000 == 0) {
+                cout << incoming->get_buffer() << endl;
+            }
 
-            queue_pair.post_send(outgoing_memory[iteration % outgoing_memory.size()], 0, 4096, IBV_SEND_SIGNALED, nullptr, &synchronizer);
-
-            while(synchronizer.get_number_operations_left() > 0) {
-                context.completion_queues->flush_send_completion_queue();
+            if(received_message_information.status == IBV_WC_SUCCESS) {
+                context.post_receive(incoming);
             }
         }
-        else {
-            queue_pair.post_send(outgoing_memory[iteration % outgoing_memory.size()], 0, 4096);
+    }
+    else {
+        TimeHolder timer;
+
+        for(uint64_t iteration = 0; iteration < number_operations; iteration++) {
+            sprintf((char *) outgoing_memory[iteration % outgoing_memory.size()]->get_buffer(), "Hello world %lu!\n", iteration);
+
+            if(iteration % 128 == 0) {
+                synchronizer.reset(1);
+
+                queue_pair.post_send(outgoing_memory[iteration % outgoing_memory.size()], 0, 4096, IBV_SEND_SIGNALED, nullptr, &synchronizer);
+
+                while(synchronizer.get_number_operations_left() > 0) {
+                    context.completion_queues->flush_send_completion_queue();
+                }
+            }
+            else {
+                queue_pair.post_send(outgoing_memory[iteration % outgoing_memory.size()], 0, 4096);
+            }
         }
 
-        ReceivedMessageInformation received_message_information;
-        while(context.completion_queues->poll_recv_completion_queue(&received_message_information) == 0) {
-        }
+        long nanosecond_difference = timer.tick();
 
-        RDMAMemory *incoming = received_message_information.get_memory();
-        if(iteration % 1000 == 0) {
-            cout << incoming->get_buffer() << endl;
-        }
+        double message_rate = ((double) (number_operations * 1000000000ULL)) / nanosecond_difference;
+        double bandwidth = ((double) (number_operations * 4096)) / (1024 * 1024) / (((double) nanosecond_difference) / 1000000000ULL);
 
-        if(received_message_information.status == IBV_WC_SUCCESS) {
-            context.post_receive(incoming);
-        }
+        printf("Rate: %.2f messages/s\nBandwidth: %.2f MB/s\n", message_rate, bandwidth);
     }
 
     cout << "done" << endl;

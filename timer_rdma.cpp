@@ -48,16 +48,16 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
-constexpr uint64_t number_operations = 6553600;
+constexpr uint64_t number_operations = 100000;
 
-IBContext context(0, 2);
+IBContext context(0, 1);
 
-bool server = false;
+char server_name[128];
+bool server;
 
-#define SYNC_HOST "0.0.0.0"
 #define SYNC_PORT 50135
 
-void tester_thread() {
+void server_or_client() {
     array<RDMAMemory *, 128> incoming_memory;
     array<RDMAMemory *, 128> outgoing_memory;
 
@@ -84,7 +84,7 @@ void tester_thread() {
 
     cout << "(Me) QP number = " << qpinfo_outgoing.number << " lid = " << qpinfo_outgoing.lid << endl;
 
-    uint64_t *incoming_data = reinterpret_cast<uint64_t *>(incoming_memory[0]->get_buffer());
+    volatile uint64_t *incoming_data = reinterpret_cast<uint64_t *>(incoming_memory[0]->get_buffer());
     uint64_t *outgoing_data = reinterpret_cast<uint64_t *>(outgoing_memory[0]->get_buffer());
     RDMAMemoryLocator *remote_memory = &qpinfo_incoming.locator;
 
@@ -99,7 +99,7 @@ void tester_thread() {
         recv(client_socket, &qpinfo_incoming, sizeof(struct QPInfo), 0);
     }
     else {
-        int server_socket = connect_server(SYNC_HOST, SYNC_PORT);
+        int server_socket = connect_server(server_name, SYNC_PORT);
 
         recv(server_socket, &qpinfo_incoming, sizeof(struct QPInfo), 0);
         send(server_socket, &qpinfo_outgoing, sizeof(struct QPInfo), 0);
@@ -110,7 +110,8 @@ void tester_thread() {
     queue_pair.setup(&context, qpinfo_incoming.number, qpinfo_incoming.lid);
 
     Synchronizer synchronizer{1};
-    sprintf((char *) outgoing_memory[0]->get_buffer(), "Hello %s!\n", server ? "client" : "server");
+    *outgoing_data = 0x0042;
+    sprintf((char *) (outgoing_data + 1), "Hello %s!\n", server ? "client" : "server");
 
     queue_pair.post_rdma_write(outgoing_memory[0], 0, 4096, remote_memory, IBV_SEND_SIGNALED, nullptr, &synchronizer);
 
@@ -118,18 +119,19 @@ void tester_thread() {
         context.completion_queues->flush_send_completion_queue();
     }
 
-    while(*incoming_data == '\0') {
+    while(*incoming_data != 0x0042) {
     }
 
-    cout << (char *) incoming_data << endl;
+    cout << (char *) (incoming_data + 1) << endl;
 
     *incoming_data = 0;
 
     if(server) {
+        // Wait for client's last message
         while(*incoming_data != 0xbeef) {
         }
 
-        // Last RDMA has flag
+        // Send server's last message
         outgoing_data = reinterpret_cast<uint64_t *>(outgoing_memory[0]->get_buffer());
         *outgoing_data = 0xbeef;
 
@@ -145,9 +147,7 @@ void tester_thread() {
         TimeHolder timer;
 
         for(uint64_t iteration = 0; iteration < number_operations - 1; iteration++) {
-            //sprintf(outgoing_memory[iteration % outgoing_memory.size()]->get_buffer(), "Hello world %d!\n", iteration);
-            outgoing_data = reinterpret_cast<uint64_t *>(outgoing_memory[iteration % outgoing_memory.size()]->get_buffer());
-            *outgoing_data = 0;
+            sprintf((char *) outgoing_memory[iteration % outgoing_memory.size()]->get_buffer(), "Hello world %lu!\n", iteration);
 
             if(iteration % 128 == 0) {
                 synchronizer.reset(1);
@@ -163,7 +163,7 @@ void tester_thread() {
             }
         }
 
-        // Last RDMA has flag
+        // Send client's last message
         outgoing_data = reinterpret_cast<uint64_t *>(outgoing_memory[(number_operations - 1) % outgoing_memory.size()]->get_buffer());
         *outgoing_data = 0xbeef;
 
@@ -175,6 +175,7 @@ void tester_thread() {
             context.completion_queues->flush_send_completion_queue();
         }
 
+        // Wait for server's last message
         while(*incoming_data != 0xbeef) {
         }
 
@@ -191,22 +192,17 @@ void tester_thread() {
 
 int main(int argc, char **argv) {
     if(argc > 1) {
-        cout << "Starting as server" << endl;
+        cout << "Starting as client" << endl;
+        server = false;
 
+        strncpy(server_name, argv[1], 128);
+    }
+    else {
+        cout << "Starting as server" << endl;
         server = true;
     }
 
-    vector<thread> thread_list;
-
-    int number_threads_process = 1;
-
-    for(int i = 0; i < number_threads_process; i++) {
-        thread_list.push_back(thread(tester_thread));
-    }
-
-    for(int i = 0; i < number_threads_process; i++) {
-        thread_list[i].join();
-    }
+    server_or_client();
 
     return 0;
 }
