@@ -1,3 +1,6 @@
 .vscode
 *.o
-timer_*
+timer_send
+timer_rdma
+timer_transmitter_send
+timer_transmitter_rdma

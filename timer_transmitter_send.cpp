@@ -48,16 +48,16 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
-constexpr uint64_t number_operations = 6553600;
+constexpr uint64_t number_operations = 100000;
 
-IBContext context(0, 2);
+IBContext context(0, 1);
 
-bool server = false;
+char server_name[128];
+bool server;
 
-#define SYNC_HOST "0.0.0.0"
 #define SYNC_PORT 50135
 
-void tester_thread() {
+void server_or_client() {
     array<RDMAMemory *, 128> incoming_memory;
     array<RDMAMemory *, 128> outgoing_memory;
 
@@ -96,7 +96,7 @@ void tester_thread() {
         recv(client_socket, &qpinfo_incoming, sizeof(struct QPInfo), 0);
     }
     else {
-        int server_socket = connect_server(SYNC_HOST, SYNC_PORT);
+        int server_socket = connect_server(server_name, SYNC_PORT);
 
         recv(server_socket, &qpinfo_incoming, sizeof(struct QPInfo), 0);
         send(server_socket, &qpinfo_outgoing, sizeof(struct QPInfo), 0);
@@ -125,50 +125,38 @@ void tester_thread() {
     if(received_message_information.status == IBV_WC_SUCCESS) {
         context.post_receive(incoming);
     }
-    else {
-        cerr << "Error receiving initial message" << endl;
-    }
 
     if(server) {
-        uint64_t received = 0;
-        uint64_t received_now = 0;
-
-        ReceivedMessageInformation received_message_information;
-
-        while(received < number_operations) {
-            while(!(received_now = context.completion_queues->poll_recv_completion_queue(&received_message_information))) {
+        for(uint64_t iteration = 0; iteration < number_operations; iteration++) {
+            ReceivedMessageInformation received_message_information;
+            while(context.completion_queues->poll_recv_completion_queue(&received_message_information) == 0) {
             }
 
-            received += received_now;
-
-            for(int i = 0; i < received_now; i++) {
-                context.post_receive(received_message_information.get_memory());
+            RDMAMemory *incoming = received_message_information.get_memory();
+            if(iteration % 1000 == 0) {
+                cout << incoming->get_buffer() << endl;
             }
-        }
 
-        synchronizer.reset(1);
-
-        transmitter.send(outgoing_memory[0], 0, 4096, IBV_SEND_SIGNALED, nullptr, &synchronizer);
-
-        while(synchronizer.get_number_operations_left() > 0) {
-            context.completion_queues->flush_send_completion_queue();
+            if(received_message_information.status == IBV_WC_SUCCESS) {
+                context.post_receive(incoming);
+            }
         }
     }
     else {
         TimeHolder timer;
 
-        for(uint64_t iteration = 0; iteration < number_operations; iteration++) {
+        for(uint64_t iteration = 0; iteration < number_operations - 1; iteration++) {
+            sprintf((char *) outgoing_memory[iteration % outgoing_memory.size()]->get_buffer(), "Hello world %lu!\n", iteration);
+
             transmitter.send(outgoing_memory[iteration % outgoing_memory.size()], 0, 4096);
         }
 
-        ReceivedMessageInformation received_message_information;
-        while(context.completion_queues->poll_recv_completion_queue(&received_message_information) == 0) {
-        }
+        synchronizer.reset(1);
 
-        RDMAMemory *incoming = received_message_information.get_memory();
+        transmitter.send(outgoing_memory[(number_operations - 1) % outgoing_memory.size()], 0, 4096, IBV_SEND_SIGNALED, nullptr, &synchronizer);
 
-        if(received_message_information.status == IBV_WC_SUCCESS) {
-            context.post_receive(incoming);
+        while(synchronizer.get_number_operations_left() > 0) {
+            context.completion_queues->flush_send_completion_queue();
         }
 
         long nanosecond_difference = timer.tick();
@@ -184,22 +172,17 @@ void tester_thread() {
 
 int main(int argc, char **argv) {
     if(argc > 1) {
-        cout << "Starting as server" << endl;
+        cout << "Starting as client" << endl;
+        server = false;
 
+        strncpy(server_name, argv[1], 128);
+    }
+    else {
+        cout << "Starting as server" << endl;
         server = true;
     }
 
-    vector<thread> thread_list;
-
-    int number_threads_process = 1;
-
-    for(int i = 0; i < number_threads_process; i++) {
-        thread_list.push_back(thread(tester_thread));
-    }
-
-    for(int i = 0; i < number_threads_process; i++) {
-        thread_list[i].join();
-    }
+    server_or_client();
 
     return 0;
 }

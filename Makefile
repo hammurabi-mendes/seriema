@@ -11,14 +11,20 @@ else
 	CPPFLAGS=-std=c++17 $(CFLAGS)
 endif
 
-PROGRAMS=timer_send timer_rdma
+PROGRAMS=timer_send timer_rdma timer_transmitter_send timer_transmitter_rdma
 
 all: $(PROGRAMS)
 
 timer_rdma: timer_rdma.cpp ibutils.cpp networking.o
 	$(CXX) $(CPPFLAGS) -o $@ $^ $(LDFLAGS)
 
+timer_transmitter_rdma: timer_transmitter_rdma.cpp ibutils.cpp networking.o
+	$(CXX) $(CPPFLAGS) -o $@ $^ $(LDFLAGS)
+
 timer_send: timer_send.cpp ibutils.cpp networking.o
+	$(CXX) $(CPPFLAGS) -o $@ $^ $(LDFLAGS)
+
+timer_transmitter_send: timer_transmitter_send.cpp ibutils.cpp networking.o
 	$(CXX) $(CPPFLAGS) -o $@ $^ $(LDFLAGS)
 
 %.o: %.c

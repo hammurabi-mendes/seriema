@@ -144,7 +144,7 @@ void server_or_client() {
     else {
         TimeHolder timer;
 
-        for(uint64_t iteration = 0; iteration < number_operations; iteration++) {
+        for(uint64_t iteration = 0; iteration < number_operations - 1; iteration++) {
             sprintf((char *) outgoing_memory[iteration % outgoing_memory.size()]->get_buffer(), "Hello world %lu!\n", iteration);
 
             if(iteration % 128 == 0) {
@@ -159,6 +159,14 @@ void server_or_client() {
             else {
                 queue_pair.post_send(outgoing_memory[iteration % outgoing_memory.size()], 0, 4096);
             }
+        }
+
+        synchronizer.reset(1);
+
+        queue_pair.post_send(outgoing_memory[(number_operations - 1) % outgoing_memory.size()], 0, 4096, IBV_SEND_SIGNALED, nullptr, &synchronizer);
+
+        while(synchronizer.get_number_operations_left() > 0) {
+            context.completion_queues->flush_send_completion_queue();
         }
 
         long nanosecond_difference = timer.tick();
