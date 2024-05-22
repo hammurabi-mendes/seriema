@@ -872,7 +872,7 @@ struct alignas(64) IBTransmitter {
                 update_flush_counters(flush_number, snapshot_outgoing_batches);
             }
             else {
-                queue_pair->post_send(memory, offset, batch_size, flags, immediate_value, synchronizer);
+                queue_pair->post_send(memory, offset, batch_size, flags, immediate_value, (batch == number_batches - 1) ? synchronizer : nullptr);
             }
 
             offset += batch_size;
@@ -921,7 +921,7 @@ struct alignas(64) IBTransmitter {
                 update_flush_counters(flush_number, snapshot_outgoing_batches);
             }
             else {
-                queue_pair->post_rdma_write(memory, offset, batch_size, &adjusted_memory_locator, flags, immediate_value, synchronizer);
+                queue_pair->post_rdma_write(memory, offset, batch_size, &adjusted_memory_locator, flags, immediate_value, (batch == number_batches - 1) ? synchronizer : nullptr);
             }
 
             offset += batch_size;
@@ -971,7 +971,7 @@ struct alignas(64) IBTransmitter {
                 update_flush_counters(flush_number, snapshot_outgoing_batches);
             }
             else {
-                queue_pair->post_rdma_read(memory, offset, batch_size, &adjusted_memory_locator, flags, synchronizer);
+                queue_pair->post_rdma_read(memory, offset, batch_size, &adjusted_memory_locator, flags, (batch == number_batches - 1) ? synchronizer : nullptr);
             }
 
             offset += batch_size;

@@ -110,6 +110,7 @@ void server_or_client() {
     queue_pair.setup(&context, qpinfo_incoming.number, qpinfo_incoming.lid);
 
     Synchronizer synchronizer{1};
+
     *outgoing_data = 0x0042;
     sprintf((char *) (outgoing_data + 1), "Hello %s!\n", server ? "client" : "server");
 
@@ -129,18 +130,6 @@ void server_or_client() {
     if(server) {
         // Wait for client's last message
         while(*incoming_data != 0xbeef) {
-        }
-
-        // Send server's last message
-        outgoing_data = reinterpret_cast<uint64_t *>(outgoing_memory[0]->get_buffer());
-        *outgoing_data = 0xbeef;
-
-        synchronizer.reset(1);
-
-        queue_pair.post_rdma_write(outgoing_memory[0], 0, 4096, remote_memory, IBV_SEND_SIGNALED, nullptr, &synchronizer);
-
-        while(synchronizer.get_number_operations_left() > 0) {
-            context.completion_queues->flush_send_completion_queue();
         }
     }
     else {
@@ -173,10 +162,6 @@ void server_or_client() {
 
         while(synchronizer.get_number_operations_left() > 0) {
             context.completion_queues->flush_send_completion_queue();
-        }
-
-        // Wait for server's last message
-        while(*incoming_data != 0xbeef) {
         }
 
         long nanosecond_difference = timer.tick();
