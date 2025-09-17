@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024, Hammurabi Mendes.
+Copyright (c) 2025, Hammurabi Mendes, Jackson McDonald.
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -29,12 +29,17 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MEMORY_ALLOCATION_HPP
 
 #include "ibutils.hpp"
+//change these to only if defined for numa along with the malloc allocator
+#include <mimalloc.h>
+#include <numa.h>
 
 #include <stdlib.h>
 #include <cstdint>
-
+#include <ctime>
 #include <vector>
 #include <mutex>
+#include <queue>
+#include <iostream>
 
 #ifdef THREAD_HANDLER_H
 using seriema::get_transmitter;
@@ -572,6 +577,152 @@ public:
 
         return topmost_allocator->deallocate_arbitrary(memory);
     }
+};
+
+struct MimallocAllocator {
+    RDMAAllocator<> *parent_allocator;
+    uint64_t watermark = 0;
+    int local_numa_node;
+
+    vector<RDMAMemory *> prepared_memory;
+
+    // Last allocated heap
+    mi_arena_id_t arena_id;
+    mi_heap_t* heap;
+
+    vector<mi_heap_t *> heap_pool;
+
+    // NUMA aware and prioritize local numa alloc but cannot specify which node allocated on
+    // https://github.com/microsoft/mimalloc/issues/116
+    public:
+
+        MimallocAllocator(RDMAAllocator<> *parent_allocator): parent_allocator(parent_allocator){
+            local_numa_node = numa_node_of_cpu(sched_getcpu());
+
+            srand(static_cast<unsigned int>(std::time(nullptr)));
+
+            // Disable mimalloc from automatically allocate chunks from OS
+            // and only use registered huge pages
+            mi_option_set(mi_option_disallow_os_alloc, 1);
+
+            increase_pool();
+        }
+
+
+        MimallocAllocator(int local_numa_node, RDMAAllocator<> *parent_allocator):
+        local_numa_node(local_numa_node), parent_allocator(parent_allocator) {
+            srand(static_cast<unsigned int>(std::time(nullptr)));
+
+            // Disable mimalloc from automatically allocate chunks from OS
+            // and only use registered huge pages
+            mi_option_set(mi_option_disallow_os_alloc, 1);
+
+            increase_pool();
+        }
+
+
+        ~MimallocAllocator() {
+            while(!heap_pool.empty()) {
+                mi_heap_t* heap = heap_pool.back();
+                mi_heap_destroy(heap);
+                heap_pool.pop_back();
+            }
+
+
+            while(!prepared_memory.empty()) {
+                RDMAMemory* memory = prepared_memory.back();
+                delete memory;
+
+                prepared_memory.pop_back();
+            }
+           
+        }
+
+        inline RDMAMemory* allocate(size_t size) {
+            void* ret = nullptr;
+
+            size_t base = static_cast<size_t>(std::rand());
+
+            int pool_index = 0;
+
+            for(size_t i=0; i<heap_pool.size(); i++) {
+                ret = mi_heap_malloc(heap_pool[(base+i) % heap_pool.size()], size);
+
+                if(ret) {
+                    pool_index = i;
+                    break;
+                }
+            }
+
+            if(ret == nullptr) {
+                pool_index = heap_pool.size();
+                increase_pool();
+                ret = mi_heap_malloc(heap, size);
+            }
+
+            RDMAMemory *other = prepared_memory[pool_index];
+            uint64_t offset = static_cast<uint64_t>(reinterpret_cast<char *>(ret) - reinterpret_cast<char *>(other->get_buffer()));
+            RDMAMemory *memory = new RDMAMemory(other, size, offset);
+
+
+            return memory;
+        }
+
+        inline RDMAMemory* allocate_outgoing(uint64_t size) {
+            void* ret = nullptr;
+
+            size_t base = static_cast<size_t>(std::rand());
+
+            int pool_index = 0;
+
+            for(size_t i=0; i<heap_pool.size(); i++) {
+                ret = mi_heap_malloc(heap_pool[(base+i) % heap_pool.size()], size);
+
+                if(ret) {
+                    pool_index = i;
+                    break;
+                }
+            }
+
+            if(ret == nullptr) {
+                pool_index = heap_pool.size();
+                increase_pool();
+                ret = mi_heap_malloc(heap, size);
+            }
+
+            RDMAMemory *other = prepared_memory[pool_index];
+            uint64_t offset = static_cast<uint64_t>(reinterpret_cast<char *>(ret) - reinterpret_cast<char *>(other->get_buffer()));
+            RDMAMemory *memory = new RDMAMemory(other, size, offset);
+
+            return memory;
+        }
+
+        inline void deallocate(RDMAMemory* p) {
+            mi_free(p->get_buffer());
+            delete p;
+        }
+   
+    private:
+        inline void increase_pool() {
+            RDMAMemory *memory =  parent_allocator->allocate_superchunk();
+            prepared_memory.push_back(memory);
+
+            void* buffer = memory->get_buffer();
+            size_t size = (size_t) memory->get_size();
+
+            // set is_exclusive to true for exclusive heap management
+            if(!mi_manage_os_memory_ex(buffer, size, true, true, false, local_numa_node, true, &arena_id)) {
+                std::cerr << "Failed to manage additional memory with mimalloc." << std::endl;
+                exit(1);
+            }
+
+            heap = mi_heap_new_in_arena(arena_id);
+            if(!heap) {
+                exit(1);
+            }
+
+            heap_pool.push_back(heap);
+        }
 };
 
 #endif /* MEMORY_ALLOCATION_HPP */

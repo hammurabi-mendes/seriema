@@ -7,22 +7,19 @@
 #include <functional>
 #include <limits.h>
 #include <thread>
+#include <chrono>
 
 #include <mpi.h>
 
-#include "definitions.h"
+#include "seriema.h"
 
-#include "utils/SerializationBuffer.hpp"
 #include "MPIHelper.hpp"
 
-#include "Barrier.hpp"
+#include "utils/Barrier.hpp"
 #include "utils/Synchronizer.hpp"
 
 using std::accumulate;
 using std::thread;
-
-using seriema::Barrier;
-using seriema::Synchronizer;
 
 using seriema::number_threads;
 using seriema::number_threads_process;
@@ -30,24 +27,81 @@ using seriema::number_processes;
 using seriema::process_rank;
 
 #define MAX_THREADS_SUPPORTED 128
+    
+thread_local RDMAMemory *my_flags_rdma;
+thread_local void *my_flags;
+thread_local RDMAMemoryLocator *others_flags;
 /**
- * Class that provides facilities to use MPI collective operations.
+ * Class that provides facilities to use MPI collective operations at thread level.
  */
 struct MPIThreadHelper {
-    /*
-     * Helper function that waits on the given request and status and then signals on the semaphore when the wait is over.  
-     * @param request The MPI_Request of the MPI call on which to wait
-     * @param status the MPI_Status of the MPI call on which to wait
-     * @param work the Synchronizer used to indicate when the wait is over
-     */
-    // static void waitOnNonBlock(MPI_Request *request, MPI_Status *status, Barrier *work, Synchronizer *wasParsed, bool signal = true) {
-    //     MPI_Wait(request, status);
-    //     work->wait();
-    //     if(signal) {
-    //         wasParsed->decrease();
-    //         cout << "signalled?" << endl;
-    //     }
-    // }
+        
+    static MPI_Datatype get_rdma_memory_locator_type() {
+        static MPI_Datatype type = [] {
+            MPI_Datatype t;
+            int block_lengths[2] = {1, 1};
+            MPI_Aint displacements[2];
+            MPI_Datatype types[2] = {MPI_AINT, MPI_UINT32_T};
+
+            displacements[0] = offsetof(RDMAMemoryLocator, buffer);
+            displacements[1] = offsetof(RDMAMemoryLocator, remote_key);
+
+            MPI_Type_create_struct(2, block_lengths, displacements, types, &t);
+            MPI_Type_commit(&t);
+
+            return t;
+        }();
+
+        return type;
+    }
+
+    static void flagsAllGather(RDMAMemoryLocator *my_flag) {
+        static Barrier thread_check_in(number_threads_process);
+        static vector<RDMAMemoryLocator> send_locators(number_threads_process);
+        static vector<RDMAMemoryLocator> recv_locators(number_threads);
+        send_locators[seriema::thread_rank] = *my_flag;
+
+        thread_check_in.wait();
+        if (seriema::thread_rank == 0){
+            MPIHelper::allGather(send_locators.data(), recv_locators.data(), get_rdma_memory_locator_type(), number_threads_process);
+        }
+        thread_check_in.wait();
+
+        memcpy(others_flags, recv_locators.data(), sizeof(RDMAMemoryLocator)*number_threads);
+    }
+
+    static void init_thread(int offset, bool create_allocators) {
+        seriema::thread_rank = offset;
+        seriema::thread_id = seriema::thread_rank + (process_rank * number_threads_process);
+
+        RDMAAllocator<seriema::GLOBAL_ALLOCATOR_CHUNK_SIZE, seriema::GLOBAL_ALLOCATOR_SUPERCHUNK_SIZE> *global_allocator = seriema::global_allocators[seriema::affinity_handler.get_numa_zone(seriema::thread_rank)];
+
+        seriema::thread_context = new seriema::ThreadContext(create_allocators, global_allocator);
+
+        my_flags_rdma = global_allocator->allocate_chunk();
+
+        my_flags = reinterpret_cast<uint64_t *>(my_flags_rdma->get_buffer());
+
+        RDMAMemoryLocator *my_flags_locator = new RDMAMemoryLocator(my_flags_rdma);
+
+        RDMAMemory *other_flags_rdma = global_allocator->allocate_chunk();
+
+        others_flags = reinterpret_cast<RDMAMemoryLocator *>(other_flags_rdma->get_buffer());
+
+        flagsAllGather(my_flags_locator);
+
+        for(int i = 0; i < 4*number_threads; i++){
+            *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + i * sizeof(uint64_t)) = 0;
+        }
+
+        for(int i = 0; i < number_threads; i++){
+            others_flags[i].buffer = others_flags[i].get_buffer(seriema::thread_id*4*sizeof(uint64_t));
+        }
+
+        #if defined(LIBNUMA) && defined(__linux__)
+            seriema::affinity_handler.set_numa_location(seriema::thread_rank);
+        #endif /* LIBNUMA and __linux__ */
+    }
 
     template<typename T>
     static inline void MPI_CHECK(T function) {
@@ -66,900 +120,390 @@ struct MPIThreadHelper {
     }
 
     /**
-	 * Returns a new datatype on \p newType that consists of \p count elements of an old datatype \oldType.
-	 */
-    static inline void getNewDatatype(MPI_Count count, MPI_Datatype oldType, MPI_Datatype *newType) {
-        MPI_Count numberChunks = count / INT_MAX;
-        MPI_Count numberRemainder = count % INT_MAX;
-
-        MPI_Datatype chunks;
-        MPI_Type_vector(numberChunks, INT_MAX, INT_MAX, oldType, &chunks);
-
-        MPI_Datatype remainder;
-        MPI_Type_contiguous(numberRemainder, oldType, &remainder);
-
-        MPI_Aint lowerBound, oldTypeExtent;
-        MPI_Type_get_extent(oldType, &lowerBound, &oldTypeExtent);
-
-        MPI_Aint remainderDisplacement = ((MPI_Aint) numberChunks) * INT_MAX * oldTypeExtent;
-
-        int lengths[2] = {1, 1};
-        MPI_Aint displacements[2] = {0, remainderDisplacement};
-        MPI_Datatype types[2] = {chunks, remainder};
-        MPI_Type_create_struct(2, lengths, displacements, types, newType);
-
-        MPI_Type_commit(newType);
-
-        MPI_Type_free(&chunks);
-        MPI_Type_free(&remainder);
-    }
-
-    /**
-	 * Returns the size associated with datatype \p type on \p size.
-	 */
-    static inline void getDatatypeExtent(MPI_Datatype type, MPI_Aint *size) {
-        MPI_Aint lbSize;
-
-        MPI_Type_get_extent(type, &lbSize, size);
-    }
-
-    /**
-	 * Creates a new MPI communicator in \p newCommunicator that represents a complete communication graph.
-	 * The new MPI communicator is created over \p oldCommunicator.
-	 */
-    static inline int createCompleteGraph(MPI_Comm oldCommunicator, MPI_Comm *newCommunicator) {
-        vector<int> sources(number_threads);
-        vector<int> destinations(number_threads);
-
-        for(int i = 0; i < number_threads; i++) {
-            sources[i] = i;
-            destinations[i] = i;
-        }
-
-        int returnValue = MPI_Dist_graph_create_adjacent(oldCommunicator, number_threads, &sources[0], MPI_UNWEIGHTED, number_threads, &destinations[0], MPI_UNWEIGHTED, MPI_INFO_NULL, 0, newCommunicator);
-
-        return returnValue;
-    }
-
-    /**
-	 * Performs an MPI Scatter operation on a per thread basis.  
-	 *
-	 * @param threadLocalSendBuffer Location of the sent data (\p numberRecords for each thread).
-	 * @param threadLocalRecvBuffer Location of the received data (\p numberRecords).
-     * @param rootThread The thread_rank for which \p threadLocalSendBuffer is valid
-	 * @param rootProcess The process for which \p threadLocalSendBuffer is valid.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 * @param numberRecords Number of records to be sent to each process by process \p root,
-	 *                      and number of records to be received by each process.
+     * Performs an MPI Scatter operation on a per thread basis.  
+     *
+     * @param send_buffer Location of the sent data (\p number_records for each process).
+     * @param recv_buffer Location of the received data (\p number_records).
+     * @param root_thread_id The thread for which \p send_buffer is valid.
+     * @param datatype MPI datatype of each element in the send and receive buffers.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
      * @param request MPI request that defaults to the thread_local global_request from dsys
-	 */
+     * @param number_records Number of records to be sent to each process by process \p root,
+     *                      and number of records to be received by each process.
+     */
+    static inline void scatter(RDMAMemory *&send_buffer, RDMAMemory *&recv_buffer, int root_thread_id, MPI_Datatype datatype, uint64_t number_records = 1, Synchronizer *addr = nullptr) {
+        int type_size;
+        MPI_Type_size(datatype, &type_size);
 
-    template<typename T>
-    static inline void doScatter(T *threadLocalSendBuffer, T *&threadLocalRecvBuffer, int rootThreadID, MPI_Datatype datatype, Synchronizer *&routineReturned, int numberRecords = 1, bool copy = true, bool nonblock = false) {
-        static T *processSendBuffer;
-        static T *processRecvBuffer;
-        static T *accumulatedRecvBuffers[MAX_THREADS_SUPPORTED];
-
-        static Barrier threadCheckIn(number_threads_process);
-        static Synchronizer bufferIsReady(1);
-
-        int rootThread = rootThreadID % number_threads_process;
-        int rootProcess = rootThreadID / number_threads_process;
-
-        if(nonblock) {
-            routineReturned = &bufferIsReady;
-        }
-        accumulatedRecvBuffers[seriema::thread_rank] = threadLocalRecvBuffer;
-        if(seriema::thread_rank == rootThread && process_rank == rootProcess) {
-            processSendBuffer = threadLocalSendBuffer;
-        }
-
-        threadCheckIn.wait();
-
-        if(seriema::thread_rank == rootThread) {
-            if(!nonblock) {
-                processRecvBuffer = new T[numberRecords / number_processes];
-                MPIHelper::scatter(processSendBuffer, processRecvBuffer, rootProcess, datatype, numberRecords / number_processes);
-            }
-            else {
-                Synchronizer *pointerToBufferIsReady = &bufferIsReady;
-                thread waiter([datatype, numberRecords, pointerToBufferIsReady, rootProcess, rootThread, copy]() {
-                    processRecvBuffer = new T[numberRecords / number_processes];
-
-                    MPIHelper::scatter(processSendBuffer, processRecvBuffer, rootProcess, datatype, numberRecords / number_processes);
-                    int numRecordsPerThread = numberRecords / number_threads;
-                    for(auto t = 0; t < number_threads_process; t++) {
-                        if(true) { //TODO: Fix when we do black box reference counting
-                            for(auto i = 0; i < numRecordsPerThread; ++i) {
-                                accumulatedRecvBuffers[t][i] = processRecvBuffer[t * numRecordsPerThread + i];
-                            }
-                        }
-                        else {
-                            accumulatedRecvBuffers[t] = &processRecvBuffer[t * numRecordsPerThread];
-                        }
-                    }
-                    pointerToBufferIsReady->decrease();
-                });
-                waiter.detach();
+        if(seriema::thread_id != root_thread_id){
+            new (reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + root_thread_id * 4 * sizeof(uint64_t))) RDMAMemoryLocator(recv_buffer);
+            seriema::get_transmitter(root_thread_id)->rdma_write(my_flags_rdma, root_thread_id * 4 * sizeof(uint64_t), sizeof(RDMAMemoryLocator), (&others_flags[root_thread_id]));
+            while(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*root_thread_id*sizeof(uint64_t)) != 0){
+            std::this_thread::yield();
             }
         }
-        if(!nonblock) {
-            if(copy) {
-                int numRecordsPerThread = numberRecords / number_threads;
-                for(auto i = 0; i < numRecordsPerThread; i++) {
-                    threadLocalRecvBuffer[i] = processRecvBuffer[seriema::thread_rank * numRecordsPerThread + i];
+
+        else{
+            new (reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + root_thread_id * 4 * sizeof(uint64_t))) RDMAMemoryLocator(recv_buffer);
+            Synchronizer sync_1{(uint64_t) number_threads};
+            Synchronizer sync_2{(uint64_t) number_threads};
+            int i = 0;
+            while(sync_1.get_number_operations_left() > 0){
+                if(i == number_threads){
+                    i = 0;
                 }
+                if(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) != 0){
+                    RDMAMemoryLocator write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + i*4*sizeof(uint64_t));
+                    seriema::get_transmitter(i)->rdma_write_batches(send_buffer, i*number_records*type_size, number_records*type_size, &write_to, 0, 0, &sync_2);
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) = 0;
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+1)*sizeof(uint64_t)) = 0;
+                    seriema::get_transmitter(i)->rdma_write(my_flags_rdma, 4*i*sizeof(uint64_t), 2*sizeof(uint64_t), &others_flags[i], 0, 0, nullptr);
+                    sync_1.decrease();
+                }
+                i++;          
             }
-            else {
-                threadLocalRecvBuffer = &processRecvBuffer[seriema::thread_rank * numberRecords / number_threads];
+            while(sync_2.get_number_operations_left() > 0){
+                seriema::context->completion_queues->flush_send_completion_queue();
             }
+        }
+
+
+        if(addr != nullptr){
+            addr->decrease();
         }
     }
 
     /**
-	 * Performs an MPI Scatter operation.
-	 * If numberRecordsExceeds INT_MAX, an alternative datatype is created to avoid overflow.
-	 *
-	 * @param sendBuffer Location of the sent data (\p numberRecords for each process).
-	 * @param recvBuffer Location of the received data (\p numberRecords).
-	 * @param root The process for which \p sendBuffer is valid.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 * @param numberRecords Number of records to be sent to each process by process \p root,
-	 *                      and number of records to be received by each process.
-	 */
-    template<typename T>
-    static inline void scatter(T *threadLocalSendBuffer, T *&threadLocalRecvBuffer, int rootThreadID, MPI_Datatype datatype, Synchronizer *&addr, uint64_t numberRecords = 1, bool copy = true, bool nonblock = false) {
-        if(numberRecords <= INT_MAX) {
-            return doScatter(threadLocalSendBuffer, threadLocalRecvBuffer, rootThreadID, datatype, addr, static_cast<int>(numberRecords), copy, nonblock);
-        }
-
-        MPI_Datatype newDatatype;
-
-        getNewDatatype(numberRecords, datatype, &newDatatype);
-
-        doScatter(threadLocalSendBuffer, threadLocalRecvBuffer, rootThreadID, newDatatype, addr, 1, copy, nonblock);
-    }
-
-    /**
-	 * Performs an MPI Gather operation.
-	 *
-	 * @param sendBuffer Location of the sent data (\p numberRecords).
-	 * @param recvBuffer Location of the received data (\p numberRecords for each process).
-	 * @param root The process for which \p recvBuffer is valid.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
+     * Performs an MPI Gather operation on a per thread basis.
+     *
+     * @param send_buffer Location of the sent data (\p number_records).
+     * @param recv_buffer Location of the received data (\p number_records for each process).
+     * @param root_thread_id The process for which \p recv_buffer is valid.
+     * @param datatype MPI datatype of each element in the send and receive buffers.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
      * @param request MPI request that defaults to the thread_local global_request from dsys.
-	 * @param numberRecords Number of records to be received from each thread, gathered locally and then gathered across process by process \p root,
-	 *                      and number of records to be sent by each thread.
-	 */
-    template<typename T>
-    static inline void doGather(T *threadLocalBuffer, T *threadLocalRecvBuffer, int rootThreadID, MPI_Datatype datatype, Synchronizer *&routineReturned, int numberRecords = 1, bool nonblock = false) {
-        static T *processLocalBuffer[MAX_THREADS_SUPPORTED];
-        static T *recvBuffer;
+     * @param number_records Number of records to be received from each thread, gathered locally and then gathered across process by process \p root,
+     *                      and number of records to be sent by each thread.
+     */
+    static inline void gather(RDMAMemory *&send_buffer, RDMAMemory *&recv_buffer, int root_thread_id, MPI_Datatype datatype, uint64_t number_records = 1, Synchronizer *addr = nullptr){
+        int type_size;
+        MPI_Type_size(datatype, &type_size);
 
-        static Barrier threadCheckIn(number_threads_process);
-        static Synchronizer bufferIsReady(1);
-
-        processLocalBuffer[seriema::thread_rank] = threadLocalBuffer;
-        if(nonblock) {
-            routineReturned = &bufferIsReady;
-        }
-
-        threadCheckIn.wait();
-
-        int rootThread = rootThreadID % number_threads_process;
-        int rootProcess = rootThreadID / number_threads_process;
-
-        if(seriema::thread_rank == rootThread) {
-            if(!nonblock) {
-                int numberRecordsInProcess = numberRecords * number_threads_process;
-                T *sendBuffer = new T[numberRecordsInProcess];
-
-                for(auto i = 0; i < numberRecordsInProcess; ++i) {
-                    sendBuffer[i] = processLocalBuffer[i / numberRecords][i % numberRecords];
+        if(seriema::thread_id == root_thread_id){
+            Synchronizer self_sync{(uint64_t) 1};
+            RDMAMemory *per_thread_recv;
+            for(int i = 0; i < number_threads; i++){
+                per_thread_recv = new RDMAMemory(recv_buffer, number_records*type_size, i*number_records*type_size);
+                if(i == root_thread_id){
+                    seriema::get_transmitter(i)->rdma_write_batches(send_buffer, 0, type_size*number_records, new RDMAMemoryLocator(per_thread_recv), 0, 0, &self_sync);
                 }
-
-                MPIHelper::gather(sendBuffer, threadLocalRecvBuffer, rootProcess, datatype, numberRecordsInProcess);
+                else{
+                    new (reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + i * 4 * sizeof(uint64_t))) RDMAMemoryLocator(per_thread_recv);
+                    seriema::get_transmitter(i)->rdma_write(my_flags_rdma, i * 4 * sizeof(uint64_t), sizeof(RDMAMemoryLocator), (&others_flags[i]));
+                }
             }
-            else {
-                recvBuffer = threadLocalRecvBuffer;
-                Synchronizer *pointerToBufferIsReady = &bufferIsReady;
-                thread waiter([datatype, numberRecords, pointerToBufferIsReady, rootProcess, rootThread]() {
-                    int numberRecordsInProcess = numberRecords * number_threads_process;
-                    T *sendBuffer = new T[numberRecordsInProcess];
-
-                    for(auto i = 0; i < numberRecordsInProcess; ++i) {
-                        sendBuffer[i] = processLocalBuffer[i / numberRecords][i % numberRecords];
-                    }
-
-                    MPIHelper::gather(sendBuffer, recvBuffer, rootProcess, datatype, numberRecordsInProcess);
-
-                    pointerToBufferIsReady->decrease();
-                });
-                waiter.detach();
+            for(int i = 0; i < number_threads; i++){
+                if(i == root_thread_id){
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*root_thread_id*sizeof(uint64_t)) = 0;
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*root_thread_id+1)*sizeof(uint64_t)) = 0;
+                }
+                while(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) != 0){
+                    std::this_thread::yield();
+                }
             }
+            while(self_sync.get_number_operations_left() > 0){
+                std::this_thread::yield();
+            }
+        }
+
+        else{
+            Synchronizer sync{(uint64_t) 1};
+            while(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*root_thread_id*sizeof(uint64_t)) == 0){
+                std::this_thread::yield();
+            }
+            RDMAMemoryLocator write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + 4*root_thread_id*sizeof(uint64_t));
+            seriema::get_transmitter(root_thread_id)->rdma_write_batches(send_buffer, 0, number_records*type_size, &write_to, 0, 0, &sync);
+            *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*root_thread_id*sizeof(uint64_t)) = 0;
+            *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*root_thread_id+1)*sizeof(uint64_t)) = 0;
+            seriema::get_transmitter(root_thread_id)->rdma_write(my_flags_rdma, 4*root_thread_id * sizeof(uint64_t), 2*sizeof(uint64_t), &others_flags[root_thread_id], 0, 0, nullptr);
+            while(sync.get_number_operations_left() > 0){
+                seriema::context->completion_queues->flush_send_completion_queue();
+            }
+        }
+
+        if(addr != nullptr){
+            addr->decrease();
         }
     }
 
-    /**
-	 * Performs an MPI Gather operation.
-	 * If numberRecordsExceeds INT_MAX, an alternative datatype is created to avoid overflow.
-	 *
-	 * @param sendBuffer Location of the sent data (\p numberRecords).
-	 * @param recvBuffer Location of the received data (\p numberRecords for each process).
-	 * @param root The process for which \p recvBuffer is valid.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 * @param numberRecords Number of records to be received from each process by process \p root,
-	 *                      and number of records to be sent by each process.
-	 */
-    template<typename T>
-    static inline void gather(T *threadLocalBuffer, T *recvBuffer, int rootThreadID, MPI_Datatype datatype, Synchronizer *&addr, uint64_t numberRecords = 1, bool nonblock = false) {
-        if(numberRecords <= INT_MAX) {
-            return doGather(threadLocalBuffer, recvBuffer, rootThreadID, datatype, addr, static_cast<int>(numberRecords), nonblock);
-        }
-
-        MPI_Datatype newDatatype;
-
-        getNewDatatype(numberRecords, datatype, &newDatatype);
-
-        doGather(threadLocalBuffer, recvBuffer, rootThreadID, newDatatype, addr, 1, nonblock);
-    }
 
     /**
-	 * Performs an MPI AllGather operation.
-	 *
-	 * @param sendBuffer Location of the sent data (\p numberRecords).
-	 * @param recvBuffer Location of the received data (\p numberRecords for each process).
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
+     * Performs an MPI AllGather operation on a per thread basis.
+     *
+     * @param send_buffer Location of the sent data (\p number_records).
+     * @param recv_buffer Location of the received data (\p number_records for each process).
+     * @param datatype MPI datatype of each element in the send and receive buffers.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
      * @param request MPI request that defaults to the thread_local global_request from dsys
-	 * @param numberRecords Number of records to be received from each process,
-	 *                      and number of records to be sent by each process.
-	 */
-    template<typename T>
-    static inline void doAllGather(T *threadLocalSendBuffer, T *&threadLocalRecvBuffer, MPI_Datatype datatype, Synchronizer *&routineReturned, int numberRecords = 1, bool copy = true, bool nonblock = false) {
-        static T *processSendBuffer[MAX_THREADS_SUPPORTED];
-        static T *processRecvBuffers[MAX_THREADS_SUPPORTED];
-        static T *processRecvBuffer;
+     * @param number_records Number of records to be received from each process,
+     *                      and number of records to be sent by each process.
+     */
+    static inline void allGather(RDMAMemory *&send_buffer, RDMAMemory *&recv_buffer, MPI_Datatype datatype, uint64_t number_records = 1, Synchronizer *addr = nullptr) {
+        int type_size;
+        MPI_Type_size(datatype, &type_size);
 
-        static Barrier threadCheckIn(number_threads_process);
-        static Synchronizer bufferIsReady(1);
-
-        if(nonblock) {
-            routineReturned = &bufferIsReady;
-        }
-
-        processSendBuffer[seriema::thread_rank] = threadLocalSendBuffer;
-        processRecvBuffers[seriema::thread_rank] = threadLocalRecvBuffer;
-
-        threadCheckIn.wait();
-
-        if(seriema::thread_rank == 0) {
-            if(!nonblock) {
-                T *accumulatedData = new T[numberRecords * number_threads_process];
-                processRecvBuffer = new T[numberRecords * number_threads];
-
-                for(auto i = 0; i < numberRecords * number_threads_process; ++i) {
-                    accumulatedData[i] = processSendBuffer[i / numberRecords][i % numberRecords];
-                }
-
-                MPIHelper::allGather(accumulatedData, processRecvBuffer, datatype, numberRecords * number_threads_process);
-            }
-            else {
-                Synchronizer *pointerToBufferIsReady = &bufferIsReady;
-                thread waiter([numberRecords, datatype, pointerToBufferIsReady, copy]() {
-                    T *accumulatedData = new T[numberRecords * number_threads_process];
-                    processRecvBuffer = new T[numberRecords * number_threads];
-
-                    for(auto i = 0; i < numberRecords * number_threads_process; ++i) {
-                        accumulatedData[i] = processSendBuffer[i / numberRecords][i % numberRecords];
-                    }
-
-                    MPIHelper::allGather(accumulatedData, processRecvBuffer, datatype, numberRecords * number_threads_process);
-
-                    for(auto t = 0; t < seriema::number_threads_process; ++t) {
-                        T *curr = processRecvBuffers[t];
-
-                        if(true) { //TODO: Fix when we do black box reference counting
-                            for(auto i = 0; i < numberRecords * number_threads; ++i) {
-                                curr[i] = processRecvBuffer[i];
-                            }
-                        }
-                        else {
-                            processRecvBuffers[t] = processRecvBuffer;
-                        }
-                    }
-                    pointerToBufferIsReady->decrease();
-                });
-                waiter.detach();
+        new (reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + seriema::thread_id * 4 * sizeof(uint64_t))) RDMAMemoryLocator(recv_buffer);
+        for(int i = 0; i < number_threads; i++){
+            if(i != seriema::thread_id){
+                seriema::get_transmitter(i)->rdma_write(my_flags_rdma, seriema::thread_id * 4 * sizeof(uint64_t), sizeof(RDMAMemoryLocator), (&others_flags[i]));
+                *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+2)*sizeof(uint64_t)) = 1;
             }
         }
-        if(!nonblock) {
-            threadCheckIn.wait();
 
-            if(copy) {
-                for(auto i = 0; i < numberRecords * number_threads; ++i) {
-                    threadLocalRecvBuffer[i] = processRecvBuffer[i];
+        Synchronizer sync_1{(uint64_t) number_threads-1};
+        Synchronizer sync_2{(uint64_t) number_threads};
+
+        RDMAMemoryLocator write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + seriema::thread_id*4*sizeof(uint64_t));
+        write_to.buffer = write_to.get_buffer(seriema::thread_id*number_records*type_size);
+        seriema::get_transmitter(seriema::thread_id)->rdma_write_batches(send_buffer, 0, number_records*type_size, &write_to, 0, 0, &sync_2);
+        
+        int i = 0;
+        while(sync_1.get_number_operations_left() > 0){
+            if(i == number_threads){
+                i = 0;
+            }
+            if(i != seriema::thread_id){
+                if(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) != 0){
+                    write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + i*4*sizeof(uint64_t));
+                    write_to.buffer = write_to.get_buffer(seriema::thread_id*number_records*type_size);
+                    seriema::get_transmitter(i)->rdma_write_batches(send_buffer, 0, number_records*type_size, &write_to, 0, 0, &sync_2);
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) = 0;
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+1)*sizeof(uint64_t)) = 0;
+                    write_to = others_flags[i];
+                    write_to.buffer = write_to.get_buffer(2*sizeof(uint64_t));
+                    seriema::get_transmitter(i)->rdma_write(my_flags_rdma, (4*seriema::thread_id+2)*sizeof(uint64_t), sizeof(uint64_t), &write_to, 0, 0, nullptr);
+                    sync_1.decrease();
                 }
             }
-            else {
-                threadLocalRecvBuffer = processRecvBuffer;
+            i++;          
+        }
+        while(sync_2.get_number_operations_left() > 0){
+            seriema::context->completion_queues->flush_send_completion_queue();
+        }
+
+        for(int i = 0; i < number_threads; i++){
+            while(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+2)*sizeof(uint64_t)) !=0){
+                std::this_thread::yield();
             }
+        }
+        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*seriema::thread_id*sizeof(uint64_t)) = 0;
+        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*seriema::thread_id+1)*sizeof(uint64_t)) = 0;
+
+        if(addr != nullptr){
+            addr->decrease();
         }
     }
 
     /**
-	 * Performs an MPI AllGather operation.
-	 * If numberRecordsExceeds INT_MAX, an alternative datatype is created to avoid overflow.
+	 * Performs an MPI All-to-All operation on a per thread basis.
 	 *
-	 * @param sendBuffer Location of the sent data (\p numberRecords).
-	 * @param recvBuffer Location of the received data (\p numberRecords for each process).
+	 * @param send_buffer Location of the sent data (\p sendSizes[i] records at \p sendOffsets[i] for each process).
+	 * @param recv_buffer Location of the received data (\p recvSizes[i] records at \p recvOffsets[i] for each process).
 	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 * @param numberRecords Number of records to be received from each process,
-	 *                      and number of records to be sent by each process.
-	 */
-    template<typename T>
-    static inline void allGather(T *threadLocalSendBuffer, T *&threadLocalRecvBuffer, MPI_Datatype datatype, Synchronizer *&addr, uint64_t numberRecords = 1, bool copy = true, bool nonblock = false) {
-        if(numberRecords <= INT_MAX) {
-            return doAllGather(threadLocalSendBuffer, threadLocalRecvBuffer, datatype, addr, static_cast<int>(numberRecords), copy, nonblock);
-        }
-
-        MPI_Datatype newDatatype;
-
-        getNewDatatype(numberRecords, datatype, &newDatatype);
-
-        doAllGather(threadLocalSendBuffer, threadLocalRecvBuffer, newDatatype, addr, 1, copy, nonblock);
-    }
-
-    /**
-	 * Performs an MPI All-to-All operation.  Does a gather on the threads and then a process All - to - All
-	 *
-	 * @param sendBuffer Location of the sent data (\p numberRecords for each process).
-	 * @param recvBuffer Location of the received data (\p numberRecords for each process).
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-     * @param request MPI request that defaults to the thread_local global_request from dsys
-	 * @param numberRecords Number of records to be received from each process,
-	 *                      and number of records to be sent by each process.
-	 */
-    template<typename T>
-    static inline void doAllToAll(T *threadLocalSendBuffer, T *&threadLocalRecvBuffer, MPI_Datatype datatype, Synchronizer *&bufferIsReady, int numberRecords = 1, bool copy = true, bool nonblock = false) {
-        // threadCheckIn.wait();
-        static T *processLocalSendBuffers[MAX_THREADS_SUPPORTED];
-        static T *accumulatedRecvBuffers[MAX_THREADS_SUPPORTED];
-        static T *processLocalRecvBuffer;
-
-        static Barrier threadCheckIn(number_threads_process);
-        static Synchronizer threadsWereParsed(1);
-
-        processLocalSendBuffers[seriema::thread_rank] = threadLocalSendBuffer;
-        accumulatedRecvBuffers[seriema::thread_rank] = threadLocalRecvBuffer;
-
-        if(nonblock) {
-            bufferIsReady = &threadsWereParsed;
-        }
-
-        threadCheckIn.wait();
-
-        if(seriema::thread_rank == 0) {
-            processLocalRecvBuffer = new T[numberRecords * number_threads_process];
-            if(!nonblock) {
-                T *accumulatedData = new T[numberRecords * number_threads_process];
-
-                for(auto i = 0; i < numberRecords * number_threads_process; ++i) {
-                    accumulatedData[i] = processLocalSendBuffers[i % number_threads_process][i / number_threads_process];
-                }
-
-                MPIHelper::doAllToAll(accumulatedData, processLocalRecvBuffer, datatype, numberRecords * number_threads_process / number_processes);
-            }
-            else {
-                Synchronizer *pointerThreadsWereParsed = &threadsWereParsed;
-                T *accumulatedData = new T[numberRecords * number_threads_process];
-                thread waiter([&, numberRecords, datatype, pointerThreadsWereParsed, copy]() {
-                    // T *recvBuffer = new T[numberRecords * number_threads_process];
-
-                    for(auto i = 0; i < numberRecords * number_threads_process; ++i) {
-                        accumulatedData[i] = processLocalSendBuffers[i % number_threads_process][i / number_threads_process];
-                    }
-
-                    MPIHelper::doAllToAll(accumulatedData, processLocalRecvBuffer, datatype, numberRecords * number_threads_process / number_processes);
-
-                    for(auto t = 0; t < seriema::number_threads_process; ++t) {
-                        T *curr = accumulatedRecvBuffers[t];
-                        if(true) { //TODO: Fix when we do black box reference counting
-                            for(auto i = 0; i < numberRecords; ++i) {
-                                curr[i] = processLocalRecvBuffer[t * numberRecords + i];
-                            }
-                        }
-                        else {
-                            curr = &processLocalRecvBuffer[t * numberRecords];
-                        }
-                    }
-                    pointerThreadsWereParsed->decrease();
-                });
-                waiter.detach();
-            }
-        }
-        if(!nonblock) {
-            threadCheckIn.wait();
-            if(copy) {
-                for(auto i = 0; i < numberRecords; i++) {
-                    threadLocalRecvBuffer[i] = processLocalRecvBuffer[seriema::thread_rank * numberRecords + i];
-                }
-            }
-            else {
-                threadLocalRecvBuffer = &processLocalRecvBuffer[seriema::thread_rank * numberRecords];
-            }
-        }
-    }
-
-    /**
-	 * Performs an MPI All-to-All operation.
-	 * If numberRecordsExceeds INT_MAX, an alternative datatype is created to avoid overflow.
-	 *
-	 * @param sendBuffer Location of the sent data (\p numberRecords for each process).
-	 * @param recvBuffer Location of the received data (\p numberRecords for each process).
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 * @param numberRecords Number of records to be received from each process,
-	 *                      and number of records to be sent by each process.
-	 */
-    template<typename T>
-    static inline void allToAll(T *threadLocalSendBuffer, T *&threadLocalRecvBuffer, MPI_Datatype datatype, Synchronizer *&bufferIsReady, uint64_t numberRecords = 1, bool copy = true, bool nonblock = false) {
-        if(numberRecords <= INT_MAX) {
-            return doAllToAll(threadLocalSendBuffer, threadLocalRecvBuffer, datatype, bufferIsReady, static_cast<int>(numberRecords), copy, nonblock);
-        }
-
-        MPI_Datatype newDatatype;
-
-        getNewDatatype(numberRecords, datatype, &newDatatype);
-
-        doAllToAll(threadLocalSendBuffer, threadLocalRecvBuffer, datatype, bufferIsReady, copy, nonblock);
-    }
-
-    /**
-	k * Performs an MPI All-to-All-V operation.
-	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the number of objects, offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the number of objects, offset from the base, to skip and receive from each process.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-     * @param request MPI request that defaults to the thread_local global_request from dsys
-	 */
-    template<typename T>
-    static inline void doAllToAllV(T *threadLocalSendBuffer, int *threadLocalSendSizes, int *threadLocalSendOffsets, T *&threadLocalRecvBuffer, int *threadLocalRecvSizes, int *threadLocalRecvOffsets, MPI_Datatype datatype, Synchronizer *&routineReturned,
-        bool copy = true, bool nonblock = false) {
-        //Process local accumulators
-        static T *processSendBuffer[MAX_THREADS_SUPPORTED];
-        static int *processSendSizes[MAX_THREADS_SUPPORTED];
-        static int *processRecvSizes[MAX_THREADS_SUPPORTED];
-        static int *processSendOffsets[MAX_THREADS_SUPPORTED];
-        static int *processRecvOffsets[MAX_THREADS_SUPPORTED];
-        static T *processRecvBuffer[MAX_THREADS_SUPPORTED];
-
-        static Barrier threadCheckIn(number_threads_process);
-        static Synchronizer bufferIsReady(1);
-
-        static T *postAllToAllVRecvBuffer;
-        static int *postAllToAllVRecvSizes;
-        if(nonblock) {
-            routineReturned = &bufferIsReady;
-        }
-
-        processSendBuffer[seriema::thread_rank] = threadLocalSendBuffer;
-        processSendSizes[seriema::thread_rank] = threadLocalSendSizes;
-        processRecvSizes[seriema::thread_rank] = threadLocalRecvSizes;
-        processRecvBuffer[seriema::thread_rank] = threadLocalRecvBuffer;
-        processRecvOffsets[seriema::thread_rank] = threadLocalRecvOffsets;
-        processSendOffsets[seriema::thread_rank] = threadLocalSendOffsets;
-
-        threadCheckIn.wait();
-
-        if(seriema::thread_rank == 0) {
-            if(!nonblock) {
-                int *threadSpecificSendSizes = new int[number_threads_process * number_threads];
-                int processSpecificSendSizes[MAX_PROCESSES_SUPPORTED] = {0};
-                int *recvSendSizes = new int[number_threads * number_threads_process];
-
-                int totalSend = 0;
-                for(auto i = 0; i < number_threads; i++) {
-                    for(auto j = 0; j < number_threads_process; j++) {
-                        threadSpecificSendSizes[i * number_threads_process + j] = processSendSizes[j][i];
-                        totalSend += processSendSizes[j][i];
-                        processSpecificSendSizes[seriema::get_process_rank(i)] += processSendSizes[j][i];
-                    }
-                }
-
-                MPIHelper::allToAll(threadSpecificSendSizes, recvSendSizes, MPI_INT, number_threads * number_threads_process / number_processes);
-
-                int flattenedSendOffsets[MAX_PROCESSES_SUPPORTED] = {0};
-                int offsetSoFar = 0;
-
-                for(auto i = 0; i < number_processes; ++i) {
-                    flattenedSendOffsets[i] = offsetSoFar;
-                    offsetSoFar += processSpecificSendSizes[i];
-                }
-
-                int flattenedRecvSizes[MAX_PROCESSES_SUPPORTED] = {0};
-                int recvBufferSize = 0;
-                for(auto i = 0; i < number_threads * number_threads_process; i++) {
-                    recvBufferSize += recvSendSizes[i];
-                    flattenedRecvSizes[i / (number_threads_process * number_threads_process)] += recvSendSizes[i];
-                }
-
-                T *recvBuffer = new T[recvBufferSize];
-
-                int flattenedRecvOffsets[MAX_PROCESSES_SUPPORTED] = {0};
-                int flattenedRecvOffset = 0;
-                for(auto i = 0; i < number_processes; ++i) {
-                    flattenedRecvOffsets[i] = flattenedRecvOffset;
-                    flattenedRecvOffset += flattenedRecvSizes[i];
-                }
-
-                T *flattenedSendBuffer = new T[totalSend];
-                int flattenedSendBufferIndex = 0;
-
-                for(auto i = 0; i < number_threads; ++i) {
-                    for(auto j = 0; j < number_threads_process; ++j) {
-                        int sendCount = processSendSizes[j][i];
-                        int offset = processSendOffsets[j][i];
-                        for(auto k = 0; k < sendCount; ++k) {
-                            flattenedSendBuffer[flattenedSendBufferIndex] = processSendBuffer[j][offset + k];
-                            flattenedSendBufferIndex++;
-                        }
-                    }
-                }
-
-                MPIHelper::doAllToAllV(flattenedSendBuffer, processSpecificSendSizes, flattenedSendOffsets, recvBuffer, flattenedRecvSizes, flattenedRecvOffsets, datatype);
-
-                postAllToAllVRecvBuffer = recvBuffer;
-                postAllToAllVRecvSizes = recvSendSizes;
-            }
-            else {
-                Synchronizer *pointerToBufferIsReady = &bufferIsReady;
-                thread waiter([pointerToBufferIsReady, datatype]() {
-                    int *threadSpecificSendSizes = new int[number_threads_process * number_threads];
-                    int processSpecificSendSizes[MAX_PROCESSES_SUPPORTED] = {0};
-                    int *recvSendSizes = new int[number_threads * number_threads_process];
-
-                    int totalSend = 0;
-                    for(auto i = 0; i < number_threads; i++) {
-                        for(auto j = 0; j < number_threads_process; j++) {
-                            threadSpecificSendSizes[i * number_threads_process + j] = processSendSizes[j][i];
-                            totalSend += processSendSizes[j][i];
-                            processSpecificSendSizes[seriema::get_process_rank(i)] += processSendSizes[j][i];
-                        }
-                    }
-
-                    MPIHelper::allToAll(threadSpecificSendSizes, recvSendSizes, MPI_INT, number_threads * number_threads_process / number_processes);
-
-                    int flattenedSendOffsets[MAX_PROCESSES_SUPPORTED] = {0};
-                    int offsetSoFar = 0;
-
-                    for(auto i = 0; i < number_processes; ++i) {
-                        flattenedSendOffsets[i] = offsetSoFar;
-                        offsetSoFar += processSpecificSendSizes[i];
-                    }
-
-                    int flattenedRecvSizes[MAX_PROCESSES_SUPPORTED] = {0};
-                    int recvBufferSize = 0;
-                    for(auto i = 0; i < number_threads * number_threads_process; i++) {
-                        recvBufferSize += recvSendSizes[i];
-                        flattenedRecvSizes[i / (number_threads_process * number_threads_process)] += recvSendSizes[i];
-                    }
-
-                    T *recvBuffer = new T[recvBufferSize];
-
-                    int flattenedRecvOffsets[MAX_PROCESSES_SUPPORTED] = {0};
-                    int flattenedRecvOffset = 0;
-                    for(auto i = 0; i < number_processes; ++i) {
-                        flattenedRecvOffsets[i] = flattenedRecvOffset;
-                        flattenedRecvOffset += flattenedRecvSizes[i];
-                    }
-
-                    T *flattenedSendBuffer = new T[totalSend];
-                    int flattenedSendBufferIndex = 0;
-
-                    for(auto i = 0; i < number_threads; ++i) {
-                        for(auto j = 0; j < number_threads_process; ++j) {
-                            int sendCount = processSendSizes[j][i];
-                            int offset = processSendOffsets[j][i];
-                            for(auto k = 0; k < sendCount; ++k) {
-                                flattenedSendBuffer[flattenedSendBufferIndex] = processSendBuffer[j][offset + k];
-                                flattenedSendBufferIndex++;
-                            }
-                        }
-                    }
-
-                    MPIHelper::doAllToAllV(flattenedSendBuffer, processSpecificSendSizes, flattenedSendOffsets, recvBuffer, flattenedRecvSizes, flattenedRecvOffsets, datatype);
-                    int recvBufferPos = 0;
-                    if(true) { //TODO: fix when we do black box reference counting
-                        for(auto t = 0; t < number_threads_process; t++) {
-                            for(auto i = 0; i < number_processes; ++i) {
-                                for(auto j = 0; j < number_threads_process; ++j) {
-                                    for(auto k = 0; k < number_threads_process; ++k) {
-                                        int recvSizeOffset = i * number_threads_process * number_threads_process + j * number_threads_process + k;
-                                        if(j == t) {
-                                            int senderThreadID = i * number_threads_process + k;
-
-                                            int myStart = processRecvOffsets[t][senderThreadID];
-                                            int myMaxSize = processRecvSizes[t][senderThreadID];
-                                            int sentSize = recvSendSizes[recvSizeOffset];
-                                            int toRecv = std::min(myMaxSize, sentSize);
-                                            if(true) { //TODO: fix when we do black box reference counting
-                                                for(auto l = 0; l < toRecv; ++l) {
-                                                    processRecvBuffer[t][myStart + l] = recvBuffer[recvBufferPos + l];
-                                                }
-                                            }
-                                            else {
-                                                processRecvOffsets[t][senderThreadID] = recvBufferPos;
-                                                processRecvSizes[t][senderThreadID] = sentSize;
-                                            }
-                                        }
-                                        recvBufferPos += recvSendSizes[recvSizeOffset];
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    else {
-                        //TODO
-                    }
-                    pointerToBufferIsReady->decrease();
-                });
-                waiter.detach();
-            }
-        }
-        if(!nonblock) {
-            threadCheckIn.wait();
-            int recvBufferPos = 0;
-            if(!copy) {
-                threadLocalRecvBuffer = postAllToAllVRecvBuffer;
-            }
-            else {
-                for(auto i = 0; i < number_processes; ++i) {
-                    for(auto j = 0; j < number_threads_process; ++j) {
-                        for(auto k = 0; k < number_threads_process; ++k) {
-                            int recvSizeOffset = i * number_threads_process * number_threads_process + j * number_threads_process + k;
-                            if(j == seriema::thread_rank) {
-                                int senderThreadID = i * number_threads_process + k;
-
-                                int myStart = threadLocalRecvOffsets[senderThreadID];
-                                int myMaxSize = threadLocalRecvSizes[senderThreadID];
-                                int sentSize = postAllToAllVRecvSizes[recvSizeOffset];
-                                int toRecv = std::min(myMaxSize, sentSize);
-                                if(copy) {
-                                    for(auto l = 0; l < toRecv; ++l) {
-                                        threadLocalRecvBuffer[myStart + l] = postAllToAllVRecvBuffer[recvBufferPos + l];
-                                    }
-                                }
-                                else {
-                                    threadLocalRecvOffsets[senderThreadID] = recvBufferPos;
-                                    threadLocalRecvSizes[senderThreadID] = sentSize;
-                                }
-                            }
-                            recvBufferPos += postAllToAllVRecvSizes[recvSizeOffset];
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-	 * Performs an MPI All-to-All-V operation.
-	 * If numberRecordsExceeds INT_MAX, an alternative datatype is created to avoid overflow.
-	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the number of objects, offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the number of objects, offset from the base, to skip and receive from each process.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 */
-    static inline void allToAllV(SerializationBuffer &sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, SerializationBuffer &recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, Synchronizer *&addr) {
-        if(sendBuffer.size <= INT_MAX && recvBuffer.size <= INT_MAX) {
-            return smallAllToAllV(sendBuffer.data, sendSizes, sendOffsets, recvBuffer.data, recvSizes, recvOffsets, MPI_PACKED, addr);
-        }
-
-        largeAllToAllV(sendBuffer.data, sendSizes, sendOffsets, recvBuffer.data, recvSizes, recvOffsets, MPI_PACKED);
-    }
-
-    /**
-	 * Performs an MPI All-to-All-V operation.
-	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the number of objects, offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the number of objects, offset from the base, to skip and receive from each process.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 */
-    template<typename T>
-    static inline void smallAllToAllV(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype datatype, Synchronizer *&addr) {
-        vector<int> intSendSizes(number_threads);
-        vector<int> intRecvSizes(number_threads);
-
-        vector<int> intSendOffsets(number_threads);
-        vector<int> intRecvOffsets(number_threads);
-
-        for(int i = 0; i < number_threads; i++) {
-            intSendSizes[i] = static_cast<int>(sendSizes[i]);
-            intRecvSizes[i] = static_cast<int>(recvSizes[i]);
-
-            intSendOffsets[i] = static_cast<int>(sendOffsets[i]);
-            intRecvOffsets[i] = static_cast<int>(recvOffsets[i]);
-        }
-
-        doAllToAllV(sendBuffer, &intSendSizes[0], &intSendOffsets[0], recvBuffer, &intRecvSizes[0], &intRecvOffsets[0], datatype, addr);
-    }
-
-    /**
-	 * Performs an MPI All-to-All-V operation.
-	 * An alternative datatype is created to avoid overflow.
-	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the number of objects, offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the number of objects, offset from the base, to skip and receive from each process.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
      * @param request MPI request that defaults to the thread_local global_request from dsys.
+     * @param number_records Number of records to be received from each process,
+     *                      and number of records to be sent by each process.
 	 */
-    template<typename T>
-    static void largeAllToAllV(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype datatype, MPI_Request &request = seriema::global_request) {
-        vector<int> newSendSizes(number_threads);
-        vector<MPI_Datatype> newSendTypes(number_threads);
-        vector<MPI_Aint> newSendOffsets(number_threads);
+    static inline void allToAll(RDMAMemory *&send_buffer, RDMAMemory *&recv_buffer, MPI_Datatype datatype, uint64_t number_records = 1, Synchronizer *addr = nullptr) {
+        int type_size;
+        MPI_Type_size(datatype, &type_size);
 
-        vector<int> newRecvSizes(number_threads);
-        vector<MPI_Datatype> newRecvTypes(number_threads);
-        vector<MPI_Aint> newRecvOffsets(number_threads);
-
-        MPI_Aint typeSize;
-        getDatatypeExtent(datatype, &typeSize);
-
-        for(int i = 0; i < number_threads; i++) {
-            newSendSizes[i] = 1;
-            newRecvSizes[i] = 1;
-
-            getNewDatatype(sendSizes[i], datatype, &newSendTypes[i]);
-            getNewDatatype(recvSizes[i], datatype, &newRecvTypes[i]);
-
-            newSendOffsets[i] = sendOffsets[i] * typeSize;
-            newRecvOffsets[i] = recvOffsets[i] * typeSize;
+        new (reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + seriema::thread_id * 4 * sizeof(uint64_t))) RDMAMemoryLocator(recv_buffer);
+        for(int i = 0; i < number_threads; i++){
+            if(i != seriema::thread_id){
+                seriema::get_transmitter(i)->rdma_write(my_flags_rdma, seriema::thread_id * 4 * sizeof(uint64_t), sizeof(RDMAMemoryLocator), (&others_flags[i]));
+                *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+2)*sizeof(uint64_t)) = 1;
+            }
         }
 
-        MPI_Comm completeGraph;
+        Synchronizer sync_1{(uint64_t) number_threads-1};
+        Synchronizer sync_2{(uint64_t) number_threads};
 
-        createCompleteGraph(MPI_COMM_WORLD, &completeGraph);
+        RDMAMemoryLocator write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + seriema::thread_id*4*sizeof(uint64_t));
+        write_to.buffer = write_to.get_buffer(seriema::thread_id*number_records*type_size);
+        seriema::get_transmitter(seriema::thread_id)->rdma_write_batches(send_buffer, seriema::thread_id*number_records*type_size, number_records*type_size, &write_to, 0, 0, &sync_2);
+        
+        int i = 0;
+        while(sync_1.get_number_operations_left() > 0){
+            if(i == number_threads){
+                i = 0;
+            }
+            if(i != seriema::thread_id){
+                if(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) != 0){
+                    write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + i*4*sizeof(uint64_t));
+                    write_to.buffer = write_to.get_buffer(seriema::thread_id*number_records*type_size);
+                    seriema::get_transmitter(i)->rdma_write_batches(send_buffer, i*number_records*type_size, number_records*type_size, &write_to, 0, 0, &sync_2);
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) = 0;
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+1)*sizeof(uint64_t)) = 0;
+                    write_to = others_flags[i];
+                    write_to.buffer = write_to.get_buffer(2*sizeof(uint64_t));
+                    seriema::get_transmitter(i)->rdma_write(my_flags_rdma, (4*seriema::thread_id+2)*sizeof(uint64_t), sizeof(uint64_t), &write_to, 0, 0, nullptr);
+                    sync_1.decrease();
+                }
+            }
+            i++;          
+        }
+        while(sync_2.get_number_operations_left() > 0){
+            seriema::context->completion_queues->flush_send_completion_queue();
+        }
 
-        MPI_CHECK(MPI_Ineighbor_alltoallw(sendBuffer, &newSendSizes[0], &newSendOffsets[0], &newSendTypes[0], recvBuffer, &newRecvSizes[0], &newRecvOffsets[0], &newRecvTypes[0], completeGraph, &request));
+        for(int i = 0; i < number_threads; i++){
+            while(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+2)*sizeof(uint64_t)) !=0){
+                std::this_thread::yield();
+            }
+        }
+        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*seriema::thread_id*sizeof(uint64_t)) = 0;
+        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*seriema::thread_id+1)*sizeof(uint64_t)) = 0;
 
-        MPI_Comm_free(&completeGraph);
-
-        for(int i = 0; i < number_threads; i++) {
-            MPI_Type_free(&newSendTypes[i]);
-            MPI_Type_free(&newRecvTypes[i]);
+        if(addr != nullptr){
+            addr->decrease();
         }
     }
 
     /**
-	 * Performs an MPI All-to-All-W operation.
+	 * Performs an MPI All-to-All-V operation on a per thread basis.
 	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records of type \p sendTypes[i] at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the byte offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records of type \p recvTypes[i] at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the byte offset from the base, to skip and receive from each process.
+	 * @param send_buffer Location of the sent data (\p sendSizes[i] records at \p sendOffsets[i] for each process).
+	 * @param send_sizes Vector containing the number of objects sent to each process.
+	 * @param send_offsets Vector containing the number of objects, offset from the base, to skip and send to each process.
+	 * @param recv_buffer Location of the received data (\p recvSizes[i] records at \p recvOffsets[i] for each process).
+	 * @param recv_sizes Vector containing the number of objects received from each process.
+	 * @param recv_offsets Vector containing the number of objects, offset from the base, to skip and receive from each process.
 	 * @param datatype MPI datatype of each element in the send and receive buffers.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
      * @param request MPI request that defaults to the thread_local global_request from dsys
 	 */
-    // template<typename T>
-    // static inline void doAllToAllW(T *sendBuffer, int *sendSizes, int *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, int *recvSizes, int *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = seriema::global_request) {
-    //     //HM: TODO
-    // }
+    static inline void allToAllV(RDMAMemory *&send_buffer, uint64_t *send_sizes, uint64_t *send_offsets, RDMAMemory *&recv_buffer, uint64_t *recv_sizes, uint64_t *recv_offsets, MPI_Datatype datatype, Synchronizer *addr = nullptr){
+        int type_size;
+        MPI_Type_size(datatype, &type_size);
+        
+        RDMAMemoryLocator write_to;
+        new (reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + seriema::thread_id * 4 * sizeof(uint64_t))) RDMAMemoryLocator(recv_buffer);
+        for(int i = 0; i < number_threads; i++){
+            if(i != seriema::thread_id){
+                *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+3)*sizeof(uint64_t)) = recv_offsets[i];
+                write_to = others_flags[i];
+                write_to.buffer = write_to.get_buffer(2*sizeof(uint64_t));
+                seriema::get_transmitter(i)->rdma_write(my_flags_rdma, (4*i+3)*sizeof(uint64_t), sizeof(uint64_t), &write_to, 0, 0, nullptr);
+                seriema::get_transmitter(i)->rdma_write(my_flags_rdma, seriema::thread_id * 4 * sizeof(uint64_t), sizeof(RDMAMemoryLocator), (&others_flags[i]));
+            }
+        } 
+
+        Synchronizer sync_1{(uint64_t) number_threads-1};
+        Synchronizer sync_2{(uint64_t) number_threads};
+
+        write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + seriema::thread_id*4*sizeof(uint64_t));
+        uint64_t self_offset = recv_offsets[seriema::thread_id];
+        write_to.buffer = write_to.get_buffer(self_offset);
+        seriema::get_transmitter(seriema::thread_id)->rdma_write_batches(send_buffer, send_offsets[seriema::thread_id]*type_size, send_sizes[seriema::thread_id]*type_size, &write_to, 0, 0, &sync_2);
+
+        int i = 0;
+        while(sync_1.get_number_operations_left() > 0){
+            if(i == number_threads){
+                i = 0;
+            }
+            if(i != seriema::thread_id){
+                if(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) != 0){
+                    write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + i*4*sizeof(uint64_t));
+                    uint64_t offset = *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (i*4+2)*sizeof(uint64_t));
+                    offset = offset * type_size;
+                    write_to.buffer = write_to.get_buffer(offset);
+                    seriema::get_transmitter(i)->rdma_write_batches(send_buffer, send_offsets[i]*type_size, send_sizes[i]*type_size, &write_to, 0, 0, &sync_2);
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) = 0;
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+1)*sizeof(uint64_t)) = 0;
+                    *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+2)*sizeof(uint64_t)) = 0;
+                    write_to = others_flags[i];
+                    write_to.buffer = write_to.get_buffer(3*sizeof(uint64_t));
+                    seriema::get_transmitter(i)->rdma_write(my_flags_rdma, (4*seriema::thread_id+3)*sizeof(uint64_t), sizeof(uint64_t), &write_to, 0, 0, nullptr);
+                    sync_1.decrease();
+                }
+            }
+            i++;          
+        }
+        while(sync_2.get_number_operations_left() > 0){
+            seriema::context->completion_queues->flush_send_completion_queue();
+        }
+
+        for(int i = 0; i < number_threads; i++){
+            while(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+3)*sizeof(uint64_t)) !=0){
+                std::this_thread::yield();
+            }
+        }
+        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*seriema::thread_id*sizeof(uint64_t)) = 0;
+        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*seriema::thread_id+1)*sizeof(uint64_t)) = 0;
+
+        if(addr != nullptr){
+            addr->decrease();
+        }
+    }
 
     /**
-	 * Performs an MPI All-to-All-W operation.
-	 * If numberRecordsExceeds INT_MAX, an alternative datatype is created to avoid overflow.
+	 * Performs an MPI All-to-All-W operation on a per thread basis.
 	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records of type \p sendTypes[i] at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the byte offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records of type \p recvTypes[i] at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the byte offset from the base, to skip and receive from each process.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 */
-    // static inline void allToAllW(SerializationBuffer &sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, SerializationBuffer &recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes) {
-    //     if(sendBuffer.size <= INT_MAX && recvBuffer.size <= INT_MAX) {
-    //         return smallAllToAllW<char>(sendBuffer.data, sendSizes, sendOffsets, sendTypes, recvBuffer.data, recvSizes, recvOffsets, recvTypes);
-    //     }
-
-    //     largeAllToAllW<char>(sendBuffer.data, sendSizes, sendOffsets, sendTypes, recvBuffer.data, recvSizes, recvOffsets, recvTypes);
-    // }
-
-    /**
-	 * Performs an MPI All-to-All-W operation.
-	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records of type \p sendTypes[i] at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the byte offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records of type \p recvTypes[i] at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the byte offset from the base, to skip and receive from each process.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
-	 */
-    // template<typename T>
-    // static inline void smallAllToAllW(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes) {
-    //     vector<int> intSendSizes(number_threads);
-    //     vector<int> intRecvSizes(number_threads);
-
-    //     vector<int> intSendOffsets(number_threads);
-    //     vector<int> intRecvOffsets(number_threads);
-
-    //     for(int i = 0; i < number_threads; i++) {
-    //         intSendSizes[i] = static_cast<int>(sendSizes[i]);
-    //         intRecvSizes[i] = static_cast<int>(recvSizes[i]);
-
-    //         intSendOffsets[i] = static_cast<int>(sendOffsets[i]);
-    //         intRecvOffsets[i] = static_cast<int>(recvOffsets[i]);
-    //     }
-
-    //     doAllToAllW<T>(sendBuffer, &intSendSizes[0], &intSendOffsets[0], sendTypes, recvBuffer, &intRecvSizes[0], &intRecvOffsets[0], recvTypes);
-    // }
-
-    /**
-	 * Performs an MPI All-to-All-W operation.
-	 * An alternative datatype is created to avoid overflow.
-	 *
-	 * @param sendBuffer Location of the sent data (\p sendSizes[i] records of type \p sendTypes[i] at \p sendOffsets[i] for each process).
-	 * @param sendSizes Vector containing the number of objects sent to each process.
-	 * @param sendOffsets Vector containing the byte offset from the base, to skip and send to each process.
-	 * @param recvBuffer Location of the received data (\p recvSizes[i] records of type \p recvTypes[i] at \p recvOffsets[i] for each process).
-	 * @param recvSizes Vector containing the number of objects received from each process.
-	 * @param recvOffsets Vector containing the byte offset from the base, to skip and receive from each process.
-	 * @param datatype MPI datatype of each element in the send and receive buffers.
+	 * @param send_buffer Location of the sent data (\p sendSizes[i] records of type \p sendTypes[i] at \p sendOffsets[i] for each process).
+	 * @param send_sizes Vector containing the number of objects sent to each process.
+	 * @param send_offsets Vector containing the byte offset from the base, to skip and send to each process.
+     * @param send_types Vector containing the datatype send to each process.
+	 * @param recv_buffer Location of the received data (\p recvSizes[i] records of type \p recvTypes[i] at \p recvOffsets[i] for each process).
+	 * @param recv_sizes Vector containing the number of objects received from each process.
+	 * @param recv_offsets Vector containing the byte offset from the base, to skip and receive from each process.
+	 * @param recv_types Vector containing the datatype received from each process.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
      * @param request MPI request that defaults to the thread_local global_request from dsys
 	 */
-    // template<typename T>
-    // static inline void largeAllToAllW(T *sendBuffer, uint64_t *sendSizes, uint64_t *sendOffsets, MPI_Datatype *sendTypes, T *recvBuffer, uint64_t *recvSizes, uint64_t *recvOffsets, MPI_Datatype *recvTypes, MPI_Request &request = seriema::global_request) {
-    //     vector<int> newSendSizes(number_threads);
-    //     vector<MPI_Datatype> newSendTypes(number_threads);
-    //     vector<MPI_Aint> newSendOffsets(number_threads);
+    static inline void allToAllW(RDMAMemory *&send_buffer, uint64_t *send_sizes, uint64_t *send_offsets, MPI_Datatype *send_types, RDMAMemory *&recv_buffer, uint64_t *recv_sizes, uint64_t *recv_offsets, MPI_Datatype *recv_types, Synchronizer *addr = nullptr) {
+        int type_size;
 
-    //     vector<int> newRecvSizes(number_threads);
-    //     vector<MPI_Datatype> newRecvTypes(number_threads);
-    //     vector<MPI_Aint> newRecvOffsets(number_threads);
+        uint64_t send_size_byte[number_threads];
+        uint64_t recv_size_byte[number_threads];
+        //for loop is taking about 20 microseconds
+        //way to do with out MPI_Type_size?
+        for (int i  = 0; i < number_threads; i++){
+            MPI_Type_size(send_types[i], &type_size);
+            send_size_byte[i] = send_sizes[i] * type_size;
+            MPI_Type_size(send_types[i], &type_size);
+            send_size_byte[i] = send_sizes[i] * type_size;
+        }
 
-    //     for(int i = 0; i < number_threads; i++) {
-    //         newSendSizes[i] = 1;
-    //         newRecvSizes[i] = 1;
+        MPIThreadHelper::allToAllV(send_buffer, send_size_byte, send_offsets, recv_buffer, recv_size_byte, recv_offsets, MPI_CHAR);
 
-    //         getNewDatatype(sendSizes[i], sendTypes[i], &newSendTypes[i]);
-    //         getNewDatatype(recvSizes[i], recvTypes[i], &newRecvTypes[i]);
+        if(addr != nullptr){
+            addr->decrease();
+        }
+    }
 
-    //         newSendOffsets[i] = sendOffsets[i];
-    //         newRecvOffsets[i] = recvOffsets[i];
-    //     }
+    /**
+	 * Performs an MPI All-to-All-W operation on a per thread basis. Faster but with non-standard parameters.
+	 *
+	 * @param send_buffer Location of the sent data (\p sendSizes[i] records of type \p sendTypes[i] at \p sendOffsets[i] for each process).
+	 * @param send_sizes Vector containing the number of bytes sent to each process.
+	 * @param send_offsets Vector containing the byte offset from the base, to skip and send to each process.
+	 * @param recv_buffer Location of the received data (\p recvSizes[i] records of type \p recvTypes[i] at \p recvOffsets[i] for each process).
+	 * @param recv_sizes Vector containing the number of bytes received from each process.
+	 * @param recv_offsets Vector containing the byte offset from the base, to skip and receive from each process.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
+     * @param request MPI request that defaults to the thread_local global_request from dsys
+	 */
+    static inline void allToAllW(RDMAMemory *&send_buffer, uint64_t *send_sizes, uint64_t *send_offsets, RDMAMemory *&recv_buffer, uint64_t *recv_sizes, uint64_t *recv_offsets, Synchronizer *addr = nullptr) {
+        int type_size;
 
-    //     MPI_Comm completeGraph;
+        MPIThreadHelper::allToAllV(send_buffer, send_sizes, send_offsets, recv_buffer, recv_sizes, recv_offsets, MPI_CHAR);
 
-    //     createCompleteGraph(MPI_COMM_WORLD, &completeGraph);
-
-    //     MPI_CHECK(MPI_Ineighbor_alltoallw(sendBuffer, &newSendSizes[0], &newSendOffsets[0], &newSendTypes[0], recvBuffer, &newRecvSizes[0], &newRecvOffsets[0], &newRecvTypes[0], completeGraph, &request));
-
-    //     MPI_Comm_free(&completeGraph);
-
-    //     for(int i = 0; i < number_threads; i++) {
-    //         MPI_Type_free(&newSendTypes[i]);
-    //         MPI_Type_free(&newRecvTypes[i]);
-    //     }
-    // }
+        if(addr != nullptr){
+            addr->decrease();
+        }
+    }
 
     /**
      * Executes barrier for all threads in all processes
@@ -972,206 +516,59 @@ struct MPIThreadHelper {
         }
         threadCheckIn.wait();
     }
+    
+    /**
+     * Performs an MPI Broadcast operation on a per thread basis.  
+     *
+     * @param thread_buffer Location where data is sent from or received to.
+     * @param root_thread_id The thread for which \p send_buffer is valid.
+     * @param datatype MPI datatype of each element in the send and receive buffers.
+     * @param addr Synchronizer to decrement at termination, defaults to null pointer.
+     * @param request MPI request that defaults to the thread_local global_request from dsys
+     * @param number_records Number of records to be sent to each process by process \p root,
+     *                      and number of records to be received by each process.
+     */
+    static inline void broadcast(RDMAMemory *&thread_buffer, int root_thread_id, MPI_Datatype datatype, uint64_t number_records = 1, Synchronizer *addr = nullptr) {
+        int type_size;
+        MPI_Type_size(datatype, &type_size);
 
-    template<typename T>
-    static inline void broadcast(T *&threadBuffer, int rootThreadID, MPI_Datatype datatype, Synchronizer *&bufferIsReady, int numRecords = 1, bool copy = true, bool nonblock = false) {
-        static Barrier threadCheckIn(number_threads_process);
-        static Synchronizer routineReturned(1);
-        if(nonblock) {
-            bufferIsReady = &routineReturned;
+        if(seriema::thread_id != root_thread_id){
+            new (reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + root_thread_id * 4 * sizeof(uint64_t))) RDMAMemoryLocator(thread_buffer);
+            seriema::get_transmitter(root_thread_id)->rdma_write(my_flags_rdma, root_thread_id * 4 * sizeof(uint64_t), sizeof(RDMAMemoryLocator), (&others_flags[root_thread_id]));
+            while(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*root_thread_id*sizeof(uint64_t)) != 0){
+                std::this_thread::yield();
+            }
         }
 
-        static T *allThreadsBuffer[MAX_THREADS_SUPPORTED];
-        allThreadsBuffer[seriema::thread_rank] = threadBuffer;
-
-        static T *processBuffer;
-
-        threadCheckIn.wait();
-
-        int rootThread = rootThreadID % number_threads_process;
-        int rootProcess = rootThreadID / number_threads_process;
-
-        if(seriema::thread_rank == rootThread % number_threads_process) {
-            processBuffer = threadBuffer;
-            if(!nonblock) {
-                MPIHelper::broadcast(processBuffer, datatype, rootProcess, numRecords);
-            }
-            else {
-                Synchronizer *pointerRoutineReturned = &routineReturned;
-                thread waiter([&, numRecords, rootProcess, datatype, pointerRoutineReturned, copy]() {
-                    MPIHelper::broadcast(processBuffer, datatype, rootProcess, numRecords);
-                    for(auto t = 0; t < seriema::number_threads_process; ++t) {
-                        T *curr = allThreadsBuffer[t];
-                        if(copy) {
-                            for(auto i = 0; i < numRecords; ++i) {
-                                curr[i] = processBuffer[i];
-                            }
-                        }
-                        else {
-                            curr = processBuffer;
-                        }
+        else{
+            Synchronizer sync_1{(uint64_t) number_threads-1};
+            Synchronizer sync_2{(uint64_t) number_threads-1};
+            int i = 0;
+            while(sync_1.get_number_operations_left() > 0){
+                if(i == number_threads){
+                    i = 0;
+                }
+                if(i != root_thread_id){
+                    if(*reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) != 0){
+                        RDMAMemoryLocator write_to = *reinterpret_cast<RDMAMemoryLocator*>(static_cast<char*>(my_flags) + i* 4* sizeof(uint64_t));
+                        seriema::get_transmitter(i)->rdma_write_batches(thread_buffer, 0, number_records*type_size, &write_to, 0, 0, &sync_2);
+                        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + 4*i*sizeof(uint64_t)) = 0;
+                        *reinterpret_cast<uint64_t*>(static_cast<char*>(my_flags) + (4*i+1)*sizeof(uint64_t)) = 0;
+                        seriema::get_transmitter(i)->rdma_write(my_flags_rdma, i * 4 * sizeof(uint64_t), 2*sizeof(uint64_t), &others_flags[i], 0, 0, nullptr);
+                        sync_1.decrease();
                     }
-                    pointerRoutineReturned->decrease();
-                });
-                waiter.detach();
-            }
-        }
-        if(seriema::thread_rank != rootThread % seriema::number_threads_process && !nonblock) {
-            threadCheckIn.wait();
-            if(copy) {
-                for(int i = 0; i < numRecords; i++) {
-                    threadBuffer[i] = processBuffer[i];
                 }
+                i++;          
             }
-            else {
-                threadBuffer = processBuffer;
+            while(sync_2.get_number_operations_left() > 0){
+                seriema::context->completion_queues->flush_send_completion_queue();
             }
+        }
+
+        if(addr != nullptr){
+            addr->decrease();
         }
     }
-
-    /**
-	 * Reduces #cores elements using the reduce function \t G.
-	 *
-	 * @return The value globally reduced by \t G.
-	 */
-    template<typename T, typename G>
-    static T reduce(T *elements, int count, T &initialValue, G reduceGlobal) {
-        vector<T> locals(number_threads);
-
-        doAllToAll(&initialValue, &locals[0]);
-
-        T result = accumulate(locals.begin(), locals.end(), initialValue, reduceGlobal);
-
-        return result;
-    }
-
-    /**
-	 * Reduces \p count elements from vector \p elements using the reduce function \t F.
-	 * Then, reduces #cores elements using the reduce function \t G.
-	 *
-	 * @return The value globally reduced by \t G.
-	 */
-    template<typename T, typename F, typename G>
-    static T reduce(T *elements, int count, T &initialValue, F reduceLocal, G reduceGlobal) {
-        T local = accumulate(elements, elements + count, initialValue, reduceLocal);
-
-        vector<T> locals(number_threads);
-
-        doAllToAll(&local, &locals[0]);
-
-        T result = accumulate(locals.begin(), locals.end(), initialValue, reduceGlobal);
-
-        return result;
-    }
-
-    /**
-	 * Helper struct used to make all-to-all communication easier.
-	 */
-    struct AllToAllContext {
-        /// Size of the data sent to each core
-        vector<uint64_t> sendSizes;
-        /// Size of the data received from each core
-        vector<uint64_t> recvSizes;
-
-        /// Offsets in the send buffer for the data associated with each core
-        vector<uint64_t> sendOffsets;
-
-        /// Offsets in the receive buffer for the data associated with each core
-        vector<uint64_t> recvOffsets;
-
-        /// Total number of bytes sent in this core as part of this all-to-all setting
-        uint64_t sendSizeTotal;
-
-        /// Total number of bytes received in this core as part of this all-to-all setting
-        uint64_t recvSizeTotal;
-
-        /// Master send buffer used in the all-to-all setting
-        SerializationBuffer sendBuffer;
-
-        /// Master receive buffer used in the all-to-all setting
-        SerializationBuffer recvBuffer;
-
-        /// Slave send buffers, one per core, used in this all-to-all setting
-        vector<SerializationBuffer> sendBuffers;
-
-        /// Slave receive buffers, one per core, used in this all-to-all setting
-        vector<SerializationBuffer> recvBuffers;
-
-        /// If true, the total send size is initialized by the sum of each core's send size,
-        bool dynamic;
-
-        /**
-		 * Constructor for the dynamic setting, which means that the user
-		 * allocates and manipulates send data in the per-core send buffers.
-		 */
-        AllToAllContext() : sendSizes(number_threads), recvSizes(number_threads), sendOffsets(number_threads), recvOffsets(number_threads), sendSizeTotal{0UL}, recvSizeTotal{0UL}, dynamic{true} {
-            sendBuffers.resize(number_threads);
-            recvBuffers.resize(number_threads);
-        }
-
-        /**
-		 * Constructor for the non-dynamic setting, which means that the user
-		 * pre-allocates a single master buffer, while manipulates slave buffers.
-		 */
-        AllToAllContext(vector<uint64_t> &sendSizes) : sendSizes{sendSizes}, recvSizes(number_threads), sendOffsets(number_threads), recvOffsets(number_threads), sendSizeTotal{0UL}, recvSizeTotal{0UL}, dynamic{false} {
-            // Initialize sizes and prepare per-core buffers
-            prepare();
-        }
-
-        /**
-		 * Performs the all-to-all communication.
-		 */
-        inline void perform() {
-            if(dynamic) {
-                // Initialize sizes and prepare per-core buffers
-                for(int core = 0; core < number_threads; core++) {
-                    sendSizes[core] = sendBuffers[core].used;
-                }
-
-                sendBuffer.append(sendBuffers);
-
-                prepare();
-            }
-            Synchronizer *addr;
-            allToAllV(sendBuffer, &sendSizes[0], &sendOffsets[0], recvBuffer, &recvSizes[0], &recvOffsets[0], addr);
-        }
-
-        /**
-		 * Reset buffers, freeing their memory.
-		 */
-        inline void reset() {
-            sendBuffer.reset();
-            recvBuffer.reset();
-        }
-
-    private:
-        /**
-		 * Exchanges transfer sizes before the all-to-all communication.
-		 */
-        void prepare() {
-            // Shuffle receive size information
-            //TODO: Figure out, uncomment
-            //MPIHelper::allToAll(&sendSizes[0], &recvSizes[0], MPI_UINT64_T);
-
-            // Calculate offsets
-
-            sendOffsets[0] = 0;
-            partial_sum(sendSizes.begin(), sendSizes.end() - 1, sendOffsets.begin() + 1);
-
-            recvOffsets[0] = 0;
-            partial_sum(recvSizes.begin(), recvSizes.end() - 1, recvOffsets.begin() + 1);
-
-            // Calculate total sizes
-
-            sendSizeTotal = accumulate(sendSizes.begin(), sendSizes.end(), 0UL);
-            recvSizeTotal = accumulate(recvSizes.begin(), recvSizes.end(), 0UL);
-
-            // Reserve space and get out-of-order nodes
-
-            sendBuffers = sendBuffer.setupAuxiliaryBuffers(sendSizes, sendOffsets);
-            recvBuffers = recvBuffer.setupAuxiliaryBuffers(recvSizes, recvOffsets);
-        }
-    };
 };
 
 #endif /* MPI_THREAD_HELPER_HPP */

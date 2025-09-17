@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024, Hammurabi Mendes.
+Copyright (c) 2025, Hammurabi Mendes, Jackson McDonald.
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -227,7 +227,7 @@ struct ThreadContext {
     MemoryAllocator *outgoing_allocator = nullptr;
 
     LinearMemoryAllocator *linear_allocator = nullptr;
-    LinearAllocator<MemoryAllocator> *fine_outgoing_allocator = nullptr;
+    MimallocAllocator *fine_outgoing_allocator = nullptr;
 
     // Allocated and deleted outside this class
     RDMAAllocator<> *global_allocator;
@@ -245,7 +245,7 @@ struct ThreadContext {
             outgoing_allocator = new MemoryAllocator(global_allocator, THREAD_OUTGOING_MEMORY_BUFFERS, RDMA_MEMORY_SIZE);
 
             linear_allocator = new LinearMemoryAllocator(global_allocator);
-            fine_outgoing_allocator = new LinearAllocator(new MemoryAllocator(global_allocator, THREAD_OUTGOING_MEMORY_BUFFERS, RDMA_MEMORY_SIZE));
+            fine_outgoing_allocator = new MimallocAllocator(global_allocator);
         }
     }
 

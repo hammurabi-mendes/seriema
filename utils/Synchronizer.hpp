@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024, Hammurabi Mendes.
+Copyright (c) 2025, Hammurabi Mendes, Jackson McDonald.
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -134,8 +134,7 @@ public:
 
     inline void wait() {
         unique_lock<mutex> lock_completed_holder(*lock_completed);
-
-        while(number_operations_left.load(std::memory_order_relaxed) == 0) {
+        while(number_operations_left.load(std::memory_order_relaxed) > 0) {
             completed->wait(lock_completed_holder);
         }
     }
@@ -149,8 +148,7 @@ public:
         if(callback_data) {
             delete callback_data;
         }
-
-        callback_data = function;
+        callback_data = new std::function<void()>(std::forward<F>(function)); 
 
         flags |= FLAGS_CALLBACK; // Essential that this is the last operation for synchronization
     }
